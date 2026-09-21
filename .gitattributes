@@ -1,0 +1,12 @@
+# 统一 LF。Arduino IDE 和 arduino-cli 两种换行都能读，
+# 但本机 core.autocrlf=true 会让工作区在 checkout 时被换成 CRLF，
+# 于是会出现「文件没动却显示已修改」，以及每次提交一堆换行警告。
+# 钉成 eol=lf 后工作区、索引、仓库三处一致，这些噪音就没了。
+* text=auto eol=lf
+
+# 二进制文件不参与换行转换和 diff
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary
