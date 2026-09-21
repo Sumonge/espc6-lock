@@ -1,0 +1,16 @@
+# Arduino 编译产物
+build/
+*.bin
+*.elf
+*.hex
+*.map
+
+# Claude Code 本机设置（只对本机生效，别人 clone 下来没用）
+.claude/settings.local.json
+
+# 编辑器 / 系统
+.vscode/
+__pycache__/
+*.pyc
+Thumbs.db
+desktop.ini
