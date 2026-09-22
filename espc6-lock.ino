@@ -1,8 +1,19 @@
 /*
- * espc6-lock —— 定时锁固件
+ * espc6-lock —— 定时锁固件（主文件）
  * 目标板：Seeed XIAO ESP32C6
  * 显示屏：SSD1315 128x64 OLED (I2C)
  * 执行器：舵机 + 机械拨片
+ *
+ * ============================ 结构 ============================
+ * 这个文件是**框架**：硬件初始化、按键、K4 整形、应用到绘制的分发、
+ * setup/loop。具体功能在各自的应用文件里：
+ *
+ *   app.h            框架与应用之间唯一的共享头（改之前先读它的开头注释）
+ *   app_lock.ino     定时锁应用
+ *   ui_kit.ino       共用绘制工具（段版面、大号文字）
+ *
+ * 拼接顺序是「主文件在最前，其余按字母序」，所以后面那些文件能看到这里的
+ * 一切，反过来不行 —— 主文件要用后面文件里的东西，必须在 app.h 里声明。
  *
  * ============================ 功能 ============================
  *   纯倒计时时间锁，无密码。
@@ -14,7 +25,7 @@
  *            K3 启动倒计时
  *            K4 归零重设
  *   倒计时中：K4 长按满 5 秒才能取消（防误触）
- *             按住期间画面切成"紧急解锁中"+ 羽毛向右飘的 1px 进度条
+ *             按住期间画面切成"紧急解锁中"+ 羽毛向右飘的进度条
  *
  *   !! 设计前提：计时状态不保存 !!
  *   上电后一律回到「空闲 = 开锁位」。也就是说拔电重启即可绕过锁定，
@@ -41,9 +52,11 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <U8g2lib.h>
+#include "app.h"      // 必须在最顶上：自动生成的函数原型要能看见这里的类型
 
 // ==================================================================
 //  配置区 —— 需要调整的参数都在这里
+//  各应用自己的参数在各自文件顶部的配置区（例：app_lock.ino）
 // ==================================================================
 
 // ---------- 引脚 ----------
@@ -80,10 +93,20 @@ static const char*   BTN_NAMES[4] = { "K1", "K2", "K3", "K4" };
 // 曾经让间隔和步进同时加速，两者是相乘关系，导致按住 3 秒后速度
 // 骤增 18 倍，17 分钟以上的值根本停不下来。只能有一个因子变。
 
-// ---------- 行为 ----------
-#define CANCEL_HOLD_MS       5000  // 倒计时中取消需要的长按时长
-#define UNLOCK_NOTICE_MS     5000  // 归零/取消后提示显示多久
-#define MAX_SET_MINUTES      1440  // 可设上限 = 24 小时
+// ---------- K4 整形 ----------
+// K4 在应用里兼两个语义：短按给应用用，双击是"返回桌面"。为了分清，
+// 单击必须挂起等一个双击窗口 —— 理由和 adjustKey 完全一样：双击的第一下
+// 如果当场算掉，"双击返回"就会先触发一次单击的副作用。
+//
+// 这与"归零重设"交互的取舍是用户确认过的：归零晚 ≤250ms 生效，可接受。
+#define K4_DOUBLE_MS         300   // 第二次按下要在这个窗口内才算双击
+#define K4_TAP_MAX_MS        800   // 按住超过这么久就不算单击（是长按，不发 tap）
+//
+// K4_TAP_MAX_MS 不是可选的润色，是必须的：倒计时中"长按 5 秒取消"松手时，
+// 如果没有这道闸，会补发一次单击，而锁应用在空闲态把单击当"归零重设"——
+// 于是"取消完顺手把设定值清成 0"。症状很隐蔽，只有从倒计时里取消才看得到。
+
+// ---------- 框架 ----------
 #define UI_REFRESH_MS          50  // 屏幕刷新周期
 
 // ---------- 显示 ----------
@@ -109,6 +132,16 @@ static const char*   BTN_NAMES[4] = { "K1", "K2", "K3", "K4" };
 // 保底备选：u8g2_font_10x20_tf（等宽 10px，一定能用，但明显小一圈）
 #define BIG_FONT  u8g2_font_logisoso24_tn
 
+// ---------- 版面 ----------
+// 屏幕横向四等分，每段 16px。这几个尺寸放在这里而不是 ui_kit.ino，是因为
+// .ino 按字母序拼接、ui_kit 排在最后，而 app_lock.ino 要用 BAND_SEP_Y ——
+// 宏是文本替换，定义点必须在用处之前。
+#define BAND_H          16      // 每段高度
+#define BAND_BASE0      12      // 第 1 段文字的基线
+#define BAND_SEP_Y      15      // 唯一一条分隔线的 y 坐标
+#define BIG_TIME_BASE   44      // 大号文字的基线（跨第 2、3 段）
+                                // 数字偏高就把这个值调大，偏低就调小，一次 1~2
+
 // ==================================================================
 //  显示屏对象
 // ==================================================================
@@ -127,7 +160,10 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(
 //   pressEdge   —— 消抖后"刚按下"那一次
 //   repeatEdge  —— 按住不放时周期性触发（带加速，用于快速加减）
 //   releaseEdge —— 松开那一次
-// heldMs() 单独给 K4 的"长按 5 秒取消"用。
+// heldMs() 单独给"长按"语义用。
+//
+// 注意 K4 例外：应用**不得**直接读 btn[3].pressEdge / releaseEdge，
+// 必须走 k4TapTake() / k4HeldMs()，理由见 K4 配置区。
 struct Button {
   uint8_t  pin;
   bool     raw          = false;  // 原始电平（已折算成"按下 = true"）
@@ -185,6 +221,8 @@ static uint32_t heldMs(const Button &b, uint32_t now) {
   return b.level ? (now - b.downMs) : 0;
 }
 
+uint32_t k4HeldMs(uint32_t now) { return heldMs(btn[3], now); }
+
 
 // ==================================================================
 //  舵机
@@ -219,475 +257,116 @@ static inline void servoLock()   { servoWriteUs(SERVO_US_LOCK);   }
 
 
 // ==================================================================
-//  状态机
+//  应用表
 // ==================================================================
-enum State : uint8_t { ST_IDLE, ST_RUNNING };
-
-// 倒计时归零和长按 K4 取消走的是同一条收尾路径，但屏幕文案必须分开 ——
-// 自己主动取消却看到"时间到"，会让人以为按钮按错了。
-//
-// 这里用宏而不是 enum：Arduino 会给 .ino 里的函数自动生成原型，并插到
-// 文件靠前的位置。若 enterIdle() 的签名里用了本文件后面才定义的类型，
-// 生成出来的原型就会报 "has not been declared"。
-#define UNLOCK_TIMEOUT   false   // 倒计时自己走完
-#define UNLOCK_MANUAL    true    // 长按 K4 主动取消
-
-static State    state              = ST_IDLE;
-static uint16_t setMinutes         = 0;    // 用户设定的时长（分钟）
-static uint32_t remainMs           = 0;    // 剩余毫秒
-static uint32_t lastTickMs         = 0;
-static uint32_t unlockNoticeStartMs = 0;   // "已解锁" 提示是何时开始的（开锁动画要用）
-static uint32_t unlockNoticeEndMs   = 0;   // "已解锁" 提示显示到什么时候
-static bool     unlockWasManual     = false;  // 本次是主动取消还是超时
-
-// K1/K2 的"已按下一次，正在等第二次"状态，详见 adjustKey()。
-// [0] = K1（加），[1] = K2（减）
-struct ClickState {
-  bool     waiting = false;
-  uint32_t firstMs = 0;
-};
-static ClickState click[2];
-
-
-static void enterIdle(uint32_t now, bool manual) {
-  state               = ST_IDLE;
-  remainMs            = 0;
-  unlockNoticeStartMs = now;
-  unlockNoticeEndMs   = now + UNLOCK_NOTICE_MS;
-  unlockWasManual     = manual;
-  servoUnlock();
-  Serial.printf("[timer] %s -> 空闲/开锁位 (本次设定 %u 分钟)\n",
-                manual ? "手动取消" : "时间到", setMinutes);
-}
-
-static void startTimer(uint32_t now) {
-  click[0].waiting = click[1].waiting = false;   // 丢弃没结完的单击，别带进倒计时
-  if (setMinutes == 0) return;
-
-  remainMs   = (uint32_t)setMinutes * 60000UL;
-  lastTickMs = now;
-  state      = ST_RUNNING;
-
-  servoLock();
-  Serial.printf("[timer] 启动倒计时 %u 分钟 -> 锁定位\n", setMinutes);
-}
-
-static void timerTick(uint32_t now) {
-  if (state != ST_RUNNING) return;
-
-  const uint32_t dt = now - lastTickMs;   // 用增量累加，天然免疫 millis() 回绕
-  lastTickMs = now;
-
-  if (dt >= remainMs) {
-    remainMs = 0;
-    Serial.println(F("[timer] 倒计时归零"));
-    enterIdle(now, UNLOCK_TIMEOUT);
-  } else {
-    remainMs -= dt;
-  }
-}
-
-
-// ==================================================================
-//  界面
-// ==================================================================
-// 屏幕 128x64，横向四等分，每段 16px：
-//   第 1 段   —— 标题／状态
-//   第 2+3 段 —— 大号 HH:MM:SS，跨两行显示（合计 32px）
-//   第 4 段   —— 提示（待机时留空）
-//
-// 例外：长按 K4 进入紧急解锁时，第 2、3 行放动画、第 4 行放进度条
-// （见 drawUnlockProgress）。
-//
-// 中文必须用 drawUTF8()，不能用 drawStr()。
-// 本文件也必须存为 UTF-8 编码（Arduino IDE 默认如此），否则中文会乱码。
-
-#define BAND_H          16      // 每段高度
-#define BAND_BASE0      12      // 第 1 段文字的基线
-#define BAND_SEP_Y      15      // 唯一一条分隔线的 y 坐标
-#define BIG_TIME_BASE   44      // 大号时间的基线（跨第 2、3 段）
-                                // 数字偏高就把这个值调大，偏低就调小，一次 1~2
-
-static inline int bandBaseline(int i) { return BAND_BASE0 + BAND_H * i; }
-
-// 段位编号 0~3，从上到下
-static void drawBand(int i, const char *s) {
-  u8g2.setFont(CN_FONT);
-  u8g2.drawUTF8(2, bandBaseline(i), s);
-}
-
-// 把秒数画成 HH:MM:SS，用大号数字字体，按实测宽度水平居中
-static void drawBigTime(uint32_t totalSecs) {
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%02u:%02u:%02u",
-           (unsigned)(totalSecs / 3600),
-           (unsigned)((totalSecs / 60) % 60),
-           (unsigned)(totalSecs % 60));
-
-  u8g2.setFont(BIG_FONT);
-  // 用 getStrWidth 量实际宽度再居中，这样换任何字体都不会偏
-  int x = (128 - (int)u8g2.getStrWidth(buf)) / 2;
-  if (x < 0) x = 0;
-  u8g2.drawStr(x, BIG_TIME_BASE, buf);
-}
-
-// ---------- 紧急解锁进度条 ----------
-// 长按 K4 时第 1 段换成"紧急解锁中"，底下三行分两块用：
-//   第 2、3 行 —— 动画：脚丫钉在左端，羽毛随长按时长向右飘
-//   第 4 行    —— 胶囊进度条，空轨道描边、走过的部分实心（见 drawTrackCapsule）
-#define EMERGENCY_MS     150    // 长按超过这么久就切到紧急解锁界面
-#define FOOT_W            14    // 脚丫点阵的宽
-#define FOOT_H            24    // 脚丫点阵的高
-#define ANIM_BASE_Y       45    // 脚丫和羽毛共用的底线
-#define FOOT_X            14    // 脚丫左边缘
-#define FOOT_Y   (ANIM_BASE_Y - FOOT_H + 1)
-#define FEATHER_CX0       39    // 羽轴起点：紧挨脚丫右侧
-#define FEATHER_CX1      118    // 羽轴终点
-// 第 4 行的胶囊进度条。空轨道是描边，走过的部分实心填充，填充比轨道
-// 内壁再缩进 1px，两者不粘连。
-//
-// 高度 = 2*BAR_R + 1，由圆角半径定 —— 嫌细就把 BAR_R 调大，其余尺寸都是
-// 推出来的、跟着一起变：BAR_R 5 → 11px 高，6 → 13px 高。
-//
-// 从外到内三层的半径，每层之间差 1px 就是那一圈空隙：
-//   BAR_R       轨道外壁       5
-//   BAR_R - 1   轨道内壁       4   ← 中间那 1px 是描边的线宽
-//   BAR_R - 2   填充端头       3   ← 再让出的 1px 是轨道与填充的空隙
-#define BAR_X        2                  // 左边缘（右边留 2px 对称）
-#define BAR_W      124                  // 总宽：x 2..125
-#define BAR_R        5                  // 端部圆角半径
-#define BAR_CY      55                  // 中心 y：第 4 行是 48..63，中线 55.5
-#define BAR_PAD      2                  // 填充相对外壁的内缩量
-#define BAR_RF  (BAR_R - BAR_PAD)       // 填充端头的圆角半径
-
-// 脚丫用点阵画，14x24，俯视脚印、脚趾朝上。
-//
-// 位序（踩过坑，别按直觉改）：U8g2 的 drawXBMP 是「低位在左」。
-// 源码 src/clib/u8g2_bitmap.c 里 u8g2_DrawHXBMP() 是
-//     mask = 1;  ...  mask <<= 1;
-// 从 bit0 起步往左移，所以每个字节的 bit0 才是这一行最左边的像素，bit7 最右。
-//    第 1 个字节 bit0~bit7  →  第 1~8  个像素
-//    第 2 个字节 bit0~bit5  →  第 9~14 个像素（高 2 位空着不用）
-// 按 MSB 打包会出两个错：前 8 个像素左右镜像，而第 2 个字节高位的像素
-// 因为一行只数 14 位、根本读不到而被丢掉 —— 表现就是脚丫只画出左边一半。
-// 每行后面的注释画的就是这一行，想改形状照着一行行的 # 和 . 改十六进制即可。
-//
-// 形状：左脚脚印，五个脚趾朝上 —— 大脚趾在右（x10~x11，两像素宽），
-// 往左依次变小变短；底下是脚掌，第 15~18 行右边缘往里收，那就是足弓的凹陷。
-// 右轮廓每行最多只挪 1 像素，拐弯处逐行渐变（11-10-9 / 9-10-11-12），
-// 所以是圆弧收进去再放出来，不会出现一条长直的斜边。
-// 所有墨点都收在 x1~x12 之内，左右各留 1px 空白。
-static const uint8_t ICON_FOOT[48] = {
-  0x40, 0x0D,  //  ......#.#.##..
-  0x50, 0x0D,  //  ....#.#.#.##..
-  0x54, 0x0D,  //  ..#.#.#.#.##..
-  0x54, 0x0D,  //  ..#.#.#.#.##..
-  0x54, 0x0D,  //  ..#.#.#.#.##..
-  0x00, 0x00,  //  ..............   <- 脚趾与脚掌之间断开
-  0x00, 0x00,  //  ..............
-  0xF8, 0x0F,  //  ...#########..
-  0xFC, 0x1F,  //  ..###########.
-  0xFE, 0x1F,  //  .############.   <- 脚掌最宽处
-  0xFE, 0x1F,  //  .############.
-  0xFE, 0x1F,  //  .############.
-  0xFC, 0x1F,  //  ..###########.
-  0xFC, 0x1F,  //  ..###########.
-  0xF8, 0x1F,  //  ...##########.
-  0xF8, 0x0F,  //  ...#########..   <- 足弓：右边缘向内凹
-  0xF0, 0x07,  //  ....#######...
-  0xF0, 0x03,  //  ....######....
-  0xF0, 0x03,  //  ....######....
-  0xF0, 0x07,  //  ....#######...
-  0xF8, 0x0F,  //  ...#########..   <- 脚跟：往外鼓回来
-  0xF8, 0x07,  //  ...########...
-  0xF0, 0x03,  //  ....######....
-  0xE0, 0x01,  //  .....####.....
+// 加一个应用 = 在这里加一行 + 在 app.h 里声明它的五个函数。
+// APP_COUNT 在 app.h 里，改的时候两处一起改。
+static const App APP_LOCK = {
+  "定时锁", lockStatus,
+  lockEnter, lockLeave, lockTick, lockInput, lockDraw,
 };
 
-// 羽毛不用点阵，直接画。
-// 点阵在这个尺寸下只会坨成一个实心色块，怎么描都像叶子 —— 因为羽毛的特征
-// 根本不在轮廓，而在"一根轴 + 两排羽枝"这个结构。所以照结构画：
-//   羽轴 —— 一条竖线
-//   羽枝 —— 沿羽轴排一排斜线，长度按抛物线 4t(1-t) 分布，中间最长、两头收短
-#define FEATHER_BARBS     10    // 羽枝对数
-#define FEATHER_LEN       22    // 羽轴长度
-#define FEATHER_MAXLEN     6    // 最长的一对羽枝
-#define FEATHER_RISE       2    // 羽枝每伸长 2px 才上升 1px，压出羽毛那种斜度
-#define FEATHER_LEAN      10    // 羽尖相对羽轴底端向左偏这么多像素
+const App *const APPS[APP_COUNT] = { &APP_LOCK };
 
-static void drawFeather(int cx, int baseY) {
-  // 羽轴不是竖线：底端在 (cx, baseY)，斜向左上连到羽尖，整根羽毛跟着歪。
-  const int tipX = cx - FEATHER_LEAN;
-  const int tipY = baseY - FEATHER_LEN;
-  u8g2.drawLine(cx, baseY, tipX, tipY);
+static const App *curApp = nullptr;   // 永不为空 —— 但也要等 appOpen() 之后才算数
 
-  const int n = FEATHER_BARBS + 1;
-  for (int i = 1; i <= FEATHER_BARBS; i++) {
-    const int len = FEATHER_MAXLEN * 4 * i * (n - i) / (n * n);   // 抛物线
-    if (len <= 0) continue;
-    // 着生点沿倾斜的羽轴取，羽枝才会跟着羽轴一起斜，而不是挂在一根竖线上
-    const int px = cx + (tipX - cx) * i / n;
-    const int py = baseY + (tipY - baseY) * i / n;
-    const int dy = len / FEATHER_RISE;
-    u8g2.drawLine(px, py, px - len, py - dy);
-    u8g2.drawLine(px, py, px + len, py - dy);
-  }
+void appOpen(uint8_t idx) {
+  if (idx >= APP_COUNT) return;
+  if (curApp) curApp->leave();
+  curApp = APPS[idx];
+  curApp->enter();
+  Serial.printf("[app ] 进入 %s\n", curApp->name);
 }
 
-// ---------- 第 2、3 段的开锁动画 ----------
-// 归零/取消后的提示画面里，锁体固定不动，锁梁（半圆 + 两条腿）绕左腿
-// 根部向左转 90°，最后躺成水平、弧顶指向左边。
-//
-// 转轴选在左腿根部、而不是锁梁正中，是因为真锁就是这么开的：左腿始终
-// 插在锁体里当铰链。所以它转到底时会横躺在锁体内部、并从左壁穿出 2px。
-// **这不是画错了**，是"铰链没拔出来"的必然结果——想消掉这个穿模，只能
-// 把转轴挪到锁体外，那样锁梁和锁体就不再是"同一个刚体上的两截"了。
-//
-// 90° 是用户指定的动作（"锁头打开，向左水平翻转"），**不是一个可调的
-// 风格参数**：只有整 90° 才让锁梁真正躺平（水平）且指向左。小一点不叫
-// 水平，大一点就转到锁体下面去了。要改观感请调 LOCK_ANIM_MS，别动这个。
-//
-// 逐帧扫过 0~1400ms（10ms 一档）验过：0 处越界、0 处顶到 y=15 的分隔线、
-// 0 处侵入第 4 段；墨点范围 x 42..79 / y 17..44（第 2、3 段可用 y 16..47）。
-#define LOCK_CX        64   // 锁的左右中心
-#define LOCK_R          7   // 锁梁半圆的半径
-#define LOCK_CY        27   // 锁梁半圆的圆心 y（闭合位置）
-#define LOCK_LEG        8   // 锁梁两条腿的长度（含伸进锁体那一段）
-#define LOCK_BODY_X    49   // 锁体左边缘 = LOCK_CX - (LOCK_BODY_W-1)/2
-#define LOCK_BODY_Y    31   // 锁体顶边
-#define LOCK_BODY_W    31   // 锁体宽，取奇数锁体才正好以 LOCK_CX 为中心
-#define LOCK_BODY_H    14   // 锁体高
-#define LOCK_BODY_R     3   // 锁体圆角半径
-#define LOCK_SEG       12   // 锁梁半圆采样成几段折线
-#define LOCK_OPEN_DEG  90   // 完全打开时锁梁转过的角度（90 = 躺平指向左）
-#define LOCK_ANIM_MS  700   // 动画时长；之后一直停在打开状态
-#define LOCK_DEG2RAD   0.017453292f
-#define LOCK_PI        3.14159265f
-
-// 四舍五入。没用 lroundf 是为了不依赖 math.h 里那个函数是否被声明。
-static inline int lockRound(float v) { return (int)(v + (v < 0.0f ? -0.5f : 0.5f)); }
-
-static void drawLock(uint32_t elapsedMs) {
-  // 进度 0~100，再过一道缓出曲线：开头转得快、末尾慢下来停住。
-  // 匀速转到底会显得很机械，像被人硬拖过去的。
-  unsigned p = (unsigned)((uint64_t)elapsedMs * 100 / LOCK_ANIM_MS);
-  if (p > 100) p = 100;
-  const int e = 100 - (100 - (int)p) * (100 - (int)p) / 100;
-
-  // 锁体：全程不动。这个尺寸（31x14, r=3）不落进 drawRFrame 的退化区，
-  // 可以放心用 —— 只有"圆角吃满整个高度"的胶囊才需要手拼，见下一个函数。
-  u8g2.drawRFrame(LOCK_BODY_X, LOCK_BODY_Y, LOCK_BODY_W, LOCK_BODY_H, LOCK_BODY_R);
-  u8g2.drawDisc(LOCK_CX, LOCK_BODY_Y + (LOCK_BODY_H - 1) / 2, 2, U8G2_DRAW_ALL);
-
-  // 锁梁当成刚体：所有点都在"相对铰链"的局部坐标里定义，统一转完再平移。
-  // 屏幕 y 向下，所以角度取负才是视觉上的"向左上方转"。
-  const float th = (float)LOCK_OPEN_DEG * (float)e / 100.0f * LOCK_DEG2RAD;
-  const float c  = cosf(-th), s = sinf(-th);
-  const int   hx = LOCK_CX - LOCK_R;      // 铰链 x：左腿根部
-  const int   hy = LOCK_CY + LOCK_LEG;    // 铰链 y
-
-  // 局部坐标 (ox, oy) → 屏幕坐标。ox/oy 都是编译期常量，展开两次没有副作用。
-  #define LOCK_PT(ox, oy, px, py)                             \
-      const int px = hx + lockRound((ox) * c - (oy) * s);     \
-      const int py = hy + lockRound((ox) * s + (oy) * c)
-
-  // 两条腿
-  LOCK_PT(0, 0, lx0, ly0);
-  LOCK_PT(0, -LOCK_LEG, lx1, ly1);
-  LOCK_PT(2 * LOCK_R, 0, rx0, ry0);
-  LOCK_PT(2 * LOCK_R, -LOCK_LEG, rx1, ry1);
-  u8g2.drawLine(lx0, ly0, lx1, ly1);
-  u8g2.drawLine(rx0, ry0, rx1, ry1);
-
-  // 半圆采成折线。半径只有 7，12 段已经看不出棱角了。
-  // 首末两点的局部坐标恰好等于两条腿的顶端，所以三截自然接上，不用另接。
-  int px0 = 0, py0 = 0;
-  for (int i = 0; i <= LOCK_SEG; i++) {
-    const float a  = LOCK_PI - LOCK_PI * i / LOCK_SEG;
-    const float ox = LOCK_R + LOCK_R * cosf(a);
-    const float oy = -LOCK_LEG - LOCK_R * sinf(a);
-    const int x = hx + lockRound(ox * c - oy * s);
-    const int y = hy + lockRound(ox * s + oy * c);
-    if (i > 0) u8g2.drawLine(px0, py0, x, y);
-    px0 = x; py0 = y;
-  }
-
-  #undef LOCK_PT
-}
-
-// ---------- 第 4 行的胶囊进度条 ----------
-// 胶囊 = 两端半圆 + 中间两条直边，这里全部手拼，刻意不用 drawRBox/drawRFrame。
-//
-// 原因是那两个函数把直边长度算成 w-2r / h-2r，并且带 "长度 >= 3 才画" 的
-// 判断（见 src/clib/u8g2_box.c 的 u8g2_DrawRBox / u8g2_DrawRFrame）。
-// 胶囊要的正是 r = h/2 的完整半圆端头，此时 h-2r = 0，直边整段被跳过，
-// 两端反而会开一个缺口。所以这种"圆角吃满整个高度"的形状必须自己拼。
-static void drawTrackCapsule() {
-  // 两端半圆：四个象限是位标志（u8g2.h 里 0x01~0x08），OR 起来就是半圆
-  u8g2.drawCircle(BAR_X + BAR_R, BAR_CY, BAR_R,
-                  U8G2_DRAW_UPPER_LEFT | U8G2_DRAW_LOWER_LEFT);
-  u8g2.drawCircle(BAR_X + BAR_W - 1 - BAR_R, BAR_CY, BAR_R,
-                  U8G2_DRAW_UPPER_RIGHT | U8G2_DRAW_LOWER_RIGHT);
-  // 上下两条直边，接在两个半圆之间
-  u8g2.drawHLine(BAR_X + BAR_R, BAR_CY - BAR_R, BAR_W - 2 * BAR_R);
-  u8g2.drawHLine(BAR_X + BAR_R, BAR_CY + BAR_R, BAR_W - 2 * BAR_R);
-}
-
-// 走过的部分：宽度随进度长的实心胶囊。w = 填充能走的像素数。
-static void drawFillCapsule(int w) {
-  if (w <= 0) return;
-  const int x0 = BAR_X + BAR_PAD;
-
-  // 长度不满一个圆角直径时画不成胶囊（两个端头圆会重叠成一坨），
-  // 兜底画一个圆点。这样刚按住 K4 的那一刻就有反馈，而不是等到
-  // 进度攒够 6% 才出现 —— 按下没反应是最容易让人以为"按钮坏了"的。
-  if (w < 2 * BAR_RF + 1) {
-    u8g2.drawDisc(x0 + BAR_RF, BAR_CY, BAR_RF, U8G2_DRAW_ALL);
-    return;
-  }
-
-  u8g2.drawDisc(x0 + BAR_RF, BAR_CY, BAR_RF, U8G2_DRAW_ALL);              // 左端头
-  u8g2.drawDisc(x0 + w - 1 - BAR_RF, BAR_CY, BAR_RF, U8G2_DRAW_ALL);      // 右端头
-  u8g2.drawBox(x0 + BAR_RF, BAR_CY - BAR_RF,                              // 中间
-               w - 2 * BAR_RF, 2 * BAR_RF + 1);
-}
-
-static void drawUnlockProgress(uint32_t held) {
-  unsigned pct = (unsigned)((uint64_t)held * 100 / CANCEL_HOLD_MS);
-  if (pct > 100) pct = 100;
-
-  // 第 2、3 行：脚丫钉死不动，羽毛按进度从 FEATHER_CX0 飘到 FEATHER_CX1。
-  // 这里是整数 lerp：羽轴 x = 起点 + (终点 - 起点) * pct / 100，省掉浮点。
-  const int featherCx = FEATHER_CX0 + (FEATHER_CX1 - FEATHER_CX0) * (int)pct / 100;
-  u8g2.drawXBMP(FOOT_X, FOOT_Y, FOOT_W, FOOT_H, ICON_FOOT);
-  drawFeather(featherCx, ANIM_BASE_Y);
-
-  // 第 4 行：整行宽的胶囊进度条。
-  // 空轨道一直画，这样 0% 时也看得见总长 —— 光有填充看不出还剩多少。
-  drawTrackCapsule();
-  drawFillCapsule((BAR_W - 2 * BAR_PAD) * (int)pct / 100);
-}
-
-static void drawScreen(uint32_t now) {
-  u8g2.clearBuffer();
-
-  u8g2.drawHLine(0, BAND_SEP_Y, 128);   // 第 1 段与下方内容之间的一条分隔线
-
-  if (state == ST_RUNNING) {
-    const uint32_t held = heldMs(btn[3], now);
-
-    if (held > EMERGENCY_MS) {
-      drawBand(0, "紧急解锁中");
-      drawUnlockProgress(held);
-    } else {
-      // 剩余秒数向上取整，避免还剩几百毫秒就显示 0 秒
-      const uint32_t secsLeft = (remainMs + 999UL) / 1000UL;
-
-      drawBand(0, "已锁定");
-      drawBigTime(secsLeft);
-      drawBand(3, "长按 K4 取消");
-    }
-  } else if ((int32_t)(unlockNoticeEndMs - now) > 0) {
-    // 刚归零或刚取消，提示几秒。两种情况文案分开，别让主动取消显示成"时间到"。
-    // 第 2、3 段让给开锁动画，原来的大号 00:00:00 撤掉 —— 这一屏要传达的是
-    // "锁开了"，而不是"时间归零了"。
-    //
-    // 归零和主动取消**共用这段动画是用户确认过的**，不是漏改：两种情况下
-    // 锁确实都开了，配开锁动画不违和。所以别看到 unlockWasManual 就以为
-    // 这里该分叉——要分叉的只有文案，动画不分。
-    drawBand(0, unlockWasManual ? "已取消" : "已解锁");
-    drawLock(now - unlockNoticeStartMs);
-    drawBand(3, unlockWasManual ? "手动取消 拨片已打开" : "时间到  拨片已打开");
-  } else {
-    // 待机，正在设定时长
-    drawBand(0, "定时锁  待机中");
-    drawBigTime((uint32_t)setMinutes * 60);
-    // 第 4 段留空，待定
-  }
-
-  u8g2.sendBuffer();
+void appBackToDesktop(void) {
+  // 桌面应用还没做（Step 2）。在这之前"返回"是个空操作。
+  //
+  // 这个函数**必须幂等**：用户已经在桌面时再"返回"一次不能有任何副作用。
+  // 等桌面加进来，这里改成 appOpen(APP_IDX_DESKTOP) 时也要保住这一点。
 }
 
 
 // ==================================================================
-//  输入处理
+//  K4 整形
 // ==================================================================
-// 按住越久步进越大，避免设 2 小时要按 120 下。
-// 配 120ms 的固定连发间隔，三档对应速度约为 8 / 42 / 125 分钟每秒：
-//   短按，或按住 <2 秒  → 每次 1 分钟（精确调节）
-//   按住 2~5 秒         → 每次 5 分钟
-//   按住 >5 秒          → 每次 15 分钟
-static uint16_t stepFor(uint32_t held) {
-  if (held >= 5000) return 15;
-  if (held >= 2000) return  5;
-  return 1;
-}
-
-// ---------- 双击跳 1 小时 ----------
-#define DOUBLE_PRESS_MS   300   // 第二次按下要在这个窗口内才算双击
-#define DOUBLE_PRESS_STEP  60   // 双击一次跳多少分钟（1 小时）
-
-// 这一档刻意不参与连发加速 —— 1 小时是"双击"这个离散动作换来的，
-// 想调 3 小时就双击 3 次，不需要（也不应该）靠长按去加速。
-// 加速只作用在分钟级的单击/连发上（见 stepFor）。
-
-static uint16_t clampSet(int32_t v) {
-  if (v < 0)                 return 0;
-  if (v > MAX_SET_MINUTES)   return MAX_SET_MINUTES;
-  return (uint16_t)v;
-}
-
-// K1 加 / K2 减，sign 取 +1 或 -1。
+// K4 一个键要担三个语义，必须先把原始电平"整形"成互不冲突的事件，
+// 应用才可能用得对：
 //
-// 单击不能立刻生效：双击的第一下如果当场按 1 分钟算掉，双击就成了
-// "+1 分钟 再 +1 小时"。所以第一次按下先挂起，等 DOUBLE_PRESS_MS 过去
-// 没有第二次按下，才补上这次单击（按住的话按当时的档位给连发）。
-static void adjustKey(int i, int8_t sign, uint32_t now) {
-  const Button &b = btn[i];
-  ClickState   &c = click[i];
+//   短按  —— 挂起一个双击窗口后确认，应用用 k4TapTake() 取走
+//   双击  —— 框架直接返回桌面，应用根本收不到
+//   长按  —— 不发 tap，应用用 k4HeldMs() 自己判（倒计时中取消就是这么做的）
+//
+// 应用不消费这次短按，框架就当"返回桌面"。好处是设置应用一行返回代码都
+// 不用写，将来新应用忘了写也是良性失败（退回桌面，而不是卡死）。
+//
+// 状态机四步：
+//   1. 按下时若距上次按下在 K4_DOUBLE_MS 内 → 双击，作废挂起的那次
+//   2. 否则挂起，开始计时
+//   3. 挂起中：窗口没过就等；窗口过了且已松手 → 补发一次 tap；
+//              窗口过了还按着且超过 K4_TAP_MAX_MS → 是长按，不发 tap
+//   4. 双击后要吞掉这次按下直到松手，否则松手会被当成一次单击
+static bool     k4TapPending   = false;  // 本帧有一次已确认的单击，等应用来取
+static bool     k4Holding      = false;  // 有一次按下正挂着等双击窗口
+static uint32_t k4HoldSinceMs  = 0;
+static bool     k4HaveLast     = false;  // k4LastPressMs 是否有效
+static uint32_t k4LastPressMs  = 0;
+static bool     k4Swallow      = false;  // 双击已判出，吞掉这次按下直到松手
 
+bool k4TapTake(void) {
+  if (!k4TapPending) return false;
+  k4TapPending = false;
+  return true;
+}
+
+static void k4Shape(uint32_t now) {
+  const Button &b = btn[3];
+
+  // ---- 1/2. 按下 ----
   if (b.pressEdge) {
-    if (c.waiting && (uint32_t)(now - c.firstMs) <= DOUBLE_PRESS_MS) {
-      c.waiting = false;            // 双击：丢掉挂起的那次单击，直接跳 1 小时
-      setMinutes = clampSet((int32_t)setMinutes + sign * DOUBLE_PRESS_STEP);
-    } else {
-      c.waiting = true;             // 第一次按下，挂起等第二次
-      c.firstMs = now;
+    if (k4Swallow) return;                       // 正在吞，理论到不了这（松手才清）
+
+    if (k4HaveLast && (uint32_t)(now - k4LastPressMs) <= K4_DOUBLE_MS) {
+      k4HaveLast = false;
+      k4Holding  = false;                        // 挂起的那次单击作废
+      k4Swallow  = true;                         // 吞掉这次按下，等松手
+      appBackToDesktop();
+      return;
     }
-    return;
+
+    k4HaveLast    = true;
+    k4LastPressMs = now;
+    k4Holding     = true;
+    k4HoldSinceMs = now;
+    return;                                      // 注意：这一帧不发 tap
   }
 
-  if (c.waiting) {
-    if ((uint32_t)(now - c.firstMs) <= DOUBLE_PRESS_MS) return;   // 窗口内，连发也先压住
-    c.waiting = false;              // 窗口过去了，补上这次单击
-    setMinutes = clampSet((int32_t)setMinutes + sign * (int32_t)stepFor(heldMs(b, now)));
-    return;
+  // ---- 3. 挂着等窗口 ----
+  if (k4Holding) {
+    if ((uint32_t)(now - k4HoldSinceMs) <= K4_DOUBLE_MS) return;   // 窗口内，继续等
+
+    if (!b.level) {                    // 已松手 → 补发一次单击
+      k4Holding    = false;
+      k4TapPending = true;
+      return;
+    }
+    if (heldMs(b, now) < K4_TAP_MAX_MS) return;   // 还按着但不够久，再等等
+    k4Holding = false;                            // 长按，不发 tap
   }
 
-  if (b.repeatEdge) {               // 一直按着 → 连发
-    setMinutes = clampSet((int32_t)setMinutes + sign * (int32_t)stepFor(heldMs(b, now)));
-  }
+  // ---- 4. 松手清吞标志 ----
+  if (k4Swallow && !b.level) k4Swallow = false;
 }
 
-static void handleInput(uint32_t now) {
-  if (state == ST_IDLE) {
-    adjustKey(0, +1, now);                      // K1 增加时长
-    adjustKey(1, -1, now);                      // K2 减少时长
 
-    if (btn[2].pressEdge) startTimer(now);      // K3 启动
-
-    if (btn[3].pressEdge) {                     // K4 归零重设
-      setMinutes = 0;
-      unlockNoticeEndMs = 0;
-      click[0].waiting = click[1].waiting = false;
-    }
-  } else {                                      // ST_RUNNING
-    // 只有 K4 长按满 CANCEL_HOLD_MS 才能中断。
-    // 注意这里刻意不用 pressEdge，否则一碰就取消了。
-    if (heldMs(btn[3], now) >= CANCEL_HOLD_MS) {
-      enterIdle(now, UNLOCK_MANUAL);
-    }
-  }
+// ==================================================================
+//  绘制分发
+// ==================================================================
+// clearBuffer / sendBuffer 由框架负责，应用只画内容 —— 这样应用不可能忘记
+// 提交，也不会出现两次 1024 字节 @400kHz ≈ 23ms 的 I2C 传输。
+static void drawFrame(uint32_t now) {
+  u8g2.clearBuffer();
+  if (curApp) curApp->draw(now);
+  u8g2.sendBuffer();
 }
 
 
@@ -741,6 +420,9 @@ void setup() {
   Serial.printf("[servo] GPIO%d 初始化完成，上电位于开锁位 (%uus)\n",
                 PIN_SERVO, SERVO_US_UNLOCK);
 
+  // ---------- 应用 ----------
+  appOpen(0);      // 目前只有定时锁；桌面在 Step 2 加进来
+
   Serial.println(F("----------------------------------------"));
   Serial.println(F("[ui  ] K1 加 / K2 减 / K3 启动 / K4 归零"));
   Serial.println(F("[ui  ] 单击 1 分钟，长按加速，双击跳 1 小时"));
@@ -767,13 +449,27 @@ void loop() {
     }
   }
 
-  handleInput(now);
-  timerTick(now);
+  // K4 必须先整形，再交给应用 —— 顺序反了应用就会看到未处理的原始边沿
+  k4Shape(now);
+
+  if (curApp) {
+    curApp->input(now);
+
+    // 应用没把这次单击取走，就当作"返回桌面"。
+    // 这条规则让"返回"永远不会失效：将来新应用忘了处理 K4 也不会把用户困住。
+    if (k4TapPending) {
+      k4TapPending = false;
+      appBackToDesktop();
+    }
+
+    // tick 必须无条件跑：倒计时归零跟按键无关，应用在后台时也得走
+    curApp->tick(now);
+  }
 
   static uint32_t lastDrawMs = 0;
   if (now - lastDrawMs >= UI_REFRESH_MS) {
     lastDrawMs = now;
-    drawScreen(now);
+    drawFrame(now);
   }
 
   // 心跳日志：每 5 秒一行，用来确认固件真的在跑。
@@ -783,8 +479,9 @@ void loop() {
   static uint32_t lastBeatMs = 0;
   if (now - lastBeatMs >= 5000) {
     lastBeatMs = now;
-    Serial.printf("[beat] %s  up=%lus  K=[%d%d%d%d]\n",
-                  (state == ST_RUNNING) ? "RUNNING" : "IDLE  ",
+    Serial.printf("[beat] %s %s  up=%lus  K=[%d%d%d%d]\n",
+                  curApp ? curApp->name : "----",
+                  (curApp && curApp->status) ? curApp->status() : "",
                   (unsigned long)(now / 1000),
                   btn[0].level, btn[1].level, btn[2].level, btn[3].level);
   }
