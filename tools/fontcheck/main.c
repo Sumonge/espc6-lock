@@ -36,6 +36,17 @@ int main(void) {
   row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "v1.0  Sep 22 2026");
   row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "定时锁");
   row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "设置");
+
+  printf("\n== 桌面标签（1x3 网格，三格各 42px）==\n");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "定时");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "网络");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "定时锁");
+
+  printf("\n== 状态栏（y0..15，左 2px 起）==\n");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "已锁");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "开锁");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "已锁 00:00");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "开锁 00:00");
   row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "关于本机 v1.0");
   row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "ESP32-C6  500KB");
   row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "编译 Sep 22 2026");

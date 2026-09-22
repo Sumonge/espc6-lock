@@ -9,8 +9,9 @@
  * 分发、setup/loop。具体功能在各自的应用文件里：
  *
  *   app.h            框架与应用之间唯一的共享头（改之前先读它的开头注释）
- *   app_desktop.ino  桌面：3x2 图标网格
+ *   app_desktop.ino  桌面：状态栏 + 一行三格图标
  *   app_lock.ino     定时锁应用
+ *   app_net.ino      网络应用（占位，等 Step 5~7）
  *   app_settings.ino 设置应用
  *   icons.ino        图标点阵
  *   ui_kit.ino       共用绘制工具（段版面、大号文字）
@@ -19,8 +20,14 @@
  * 一切，反过来不行 —— 主文件要用后面文件里的东西，必须在 app.h 里声明。
  *
  * ============================ 功能 ============================
- *   老式功能机那样的桌面：一张 3x2 图标网格，用 K1/K2 选、K3 进、K4 返回。
- *   现在网格里有两个应用：
+ *   老式功能机那样的桌面。版面分三段：
+ *     y0..y15    状态栏（锁状态 / 信号 / 电量）
+ *     y16..y47   一行三格图标，K1/K2 选、K3 进、K4 返回
+ *     y48..y63   留空
+ *   状态栏里只有**锁状态**今天是真的；信号和电量画成空心 = "还没数"，
+ *   它们分别等 Step 7 的 WiFi 和一颗还没装的 I2C 电量计。
+ *
+ *   三个应用：
  *
  *   定时锁 —— 纯倒计时时间锁，无密码。
  *   空闲(开锁) --K3启动--> 倒计时中(锁定) --归零--> 空闲(开锁)
@@ -33,7 +40,9 @@
  *     倒计时中：K4 长按满 5 秒才能取消（防误触）
  *               按住期间画面切成"紧急解锁中"+ 羽毛向右飘的进度条
  *
- *   设置 —— 目前只有「关于」页。
+ *   网络 —— 占位页，显示"未接入"。WiFi / BLE 配网在计划里的 Step 5~7。
+ *
+ *   设置 —— 目前只有「关于」页（蓝牙页等 Step 8）。
  *
  *   !! 设计前提：计时状态不保存 !!
  *   上电后一律回到「空闲 = 开锁位」。也就是说拔电重启即可绕过锁定，
@@ -275,11 +284,19 @@ static inline void servoLock()   { servoWriteUs(SERVO_US_LOCK);   }
 // ==================================================================
 // 加一个应用 = 在这里加一行 + 在 app.h 里声明它的六个函数 + 改 APP_COUNT。
 //
-// 顺序就是桌面网格里的顺序（按行优先铺）。定时锁放第一格：它是这块板子
-// 存在的理由，桌面光标也默认停在它上面。
+// 顺序就是桌面从左到右的顺序。定时锁放第一格：它是这块板子存在的理由，
+// 桌面光标也默认停在它上面。
+//
+// 名字是**两个汉字**（不是"定时锁"）：三格 42px 三等分，标签 23/24/23px
+// 才能都居中得一样齐。这是用户定的，见 app.h 里 name 字段那段。
 static const App APP_LOCK = {
-  "定时锁", ICON_LOCK, lockStatus,
+  "定时", ICON_LOCK, lockStatus,
   lockEnter, lockLeave, lockTick, lockInput, lockDraw,
+};
+
+static const App APP_NET = {
+  "网络", ICON_NET, netStatus,
+  netEnter, netLeave, netTick, netInput, netDraw,
 };
 
 static const App APP_SETTINGS = {
@@ -287,7 +304,7 @@ static const App APP_SETTINGS = {
   setEnter, setLeave, setTick, setInput, setDraw,
 };
 
-const App *const APPS[APP_COUNT] = { &APP_LOCK, &APP_SETTINGS };
+const App *const APPS[APP_COUNT] = { &APP_LOCK, &APP_NET, &APP_SETTINGS };
 
 // 桌面**不在 APPS[] 里**：它不该出现在自己的网格中。它是那张表的视图，
 // 不是表里的一项。它的 icon 字段永远不会被画（桌面不画自己），但也不能

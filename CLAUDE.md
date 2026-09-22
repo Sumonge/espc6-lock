@@ -18,7 +18,7 @@ CLI="/c/Program Files/Arduino IDE/resources/app/lib/backend/resources/arduino-cl
 |---|---|
 | esp32 core | 3.3.11 |
 | U8g2 | 2.36.19（`C:\Users\14919\Documents\Arduino\libraries\U8g2`） |
-| 编译基线 | 513824 字节 (39%) Flash / 17044 字节 (5%) RAM —— **默认分区** |
+| 编译基线 | 514534 字节 (39%) Flash / 17044 字节 (5%) RAM —— **默认分区** |
 
 基线会随功能走，改完就更新上表。切到 `huge_app` 之后（计划 Step 4）报数要
 **同时给分区名和余量绝对值**——`huge_app` 下百分比会突然变小，只报百分比
@@ -44,6 +44,35 @@ CLI="/c/Program Files/Arduino IDE/resources/app/lib/backend/resources/arduino-cl
   水平，大一点转到锁体下面去。要改观感调 `LOCK_ANIM_MS`。
   它转到底时锁梁会横穿锁体内部，这是铰链没拔出来的必然结果，别去"修"。
 - 状态语义：计时状态不持久化，上电回开锁位（fail-open）
+
+## 桌面版面
+
+用户 2026-09-22 拍板（当时给了三种，选了中间这种）：
+
+```
+y0 ..y15    状态栏   锁状态 / 信号 / 电量
+y16..y47    图标行   一行三格，每格 42x32，三等分
+y48..y63    留空
+```
+
+16/32/16 上下对称，图标行是居中的。
+
+**两个后果要记住：**
+
+1. **桌面最多三个应用。** `APP_COUNT` 目前是 3，已顶格。第 4 个应用必须
+   先改版面（翻页，或退回两行），**不是把 3 改成 4** —— 那样第 4 格会画进
+   y48 的空白区，而且第 4 格绕回来时会盖住第 1 格。
+2. **状态栏里只有「锁状态」是真的。** 信号要等 Step 7 的 WiFi；电量更远 ——
+   PCB 的引脚已经用满，没有 ADC 脚可接分压（`hardware/NETLIST.md` §4.3），
+   真要做只能挂一颗 I2C 电量计（MAX17048，地址 0x36，不和屏幕的 0x3C 冲突）。
+   所以后两项画的是**空心** = 「还没数」，**不是**「信号为零、电池没电」。
+   宁可看着像占位，也不要画成实心让人以为电量真是 0。
+
+应用标签是**两个汉字**（`定时` / `网络` / `设置`，实测 23/24/23px）。原来的
+「定时锁」是 35px，塞是塞得下，但三个标签长短不一，三等分的网格看上去就不齐。
+这个标签同时是心跳日志里的应用名，改它两处都会跟着变。
+
+改任何几何之前：`python tools/desktop_sim.py`。
 
 ## 坑
 
@@ -208,9 +237,12 @@ return，压根不写它的出参**，`u8g2_string_width` 就拿着一堆**未�
 全部合成**一个编译单元**。本项目的实际顺序：
 
 ```
-espc6-lock.ino → app_desktop.ino → app_lock.ino → app_settings.ino
-              → icons.ino → net_lock.ino → ui_kit.ino
+espc6-lock.ino → app_desktop.ino → app_lock.ino → app_net.ino
+              → app_settings.ino → icons.ino → net_lock.ino → ui_kit.ino
 ```
+
+（`app_net.ino` 是「网络」应用，`net_lock.ino` 还没建、将来是 BLE/WiFi 的
+**服务层**。两个名字像，别搞混：`app_*` 是应用，`net_*` 是服务。）
 
 后果是：宏和 `static` 名字**只对文本上排在它后面的文件可见**。主 `.ino` 排在
 最前，所以它**看不见**任何后面文件里的东西，除非在 `app.h` 里声明。
@@ -221,9 +253,9 @@ espc6-lock.ino → app_desktop.ino → app_lock.ino → app_settings.ino
 2. **函数签名只用内建类型或 `app.h` 里的类型。** 这样即使 arduino-cli 的原型
    插入点算错也伤不到我们——所以 `appOpen()` 收的是下标 `uint8_t`，不是
    `const App *`。
-3. **所有 `static` 函数/变量必须带应用前缀**（`lock*` / `desk*` / `set*`）。
-   共用一个命名空间，两个文件各写一个 `static void enter()` 会直接重定义报错。
-   **这是强制要求，不是风格。**
+3. **所有 `static` 函数/变量必须带应用前缀**（`lock*` / `desk*` / `net*` /
+   `set*`）。共用一个命名空间，两个文件各写一个 `static void enter()` 会直接
+   重定义报错。**这是强制要求，不是风格。**
 
 另外两条容易忘的：
 
@@ -241,7 +273,7 @@ espc6-lock.ino → app_desktop.ino → app_lock.ino → app_settings.ino
 
 | 工具 | 作用 |
 |---|---|
-| `python tools/desktop_sim.py` | 桌面网格几何自检（越界 / 图标与标签重叠 / 标签装不装得下）。辅助模式：`gen` 生成点阵十六进制、`full` 打印整屏 ASCII |
+| `python tools/desktop_sim.py` | 桌面几何自检（越界 / 图标与标签重叠 / 标签装不装得下 / **状态栏三项挤不挤**）。辅助模式：`gen` 生成点阵十六进制、`full` 打印整屏 ASCII、`bar` 并排看状态栏的几种取值 |
 | `bash tools/fontcheck/run.sh` | **真字模**量宽与墨迹盒。在主机上编译 U8g2 自己的 `u8g2_font.c`，调真正的 `u8g2_GetUTF8Width()` / `DrawUTF8()` |
 
 `fontcheck` 为什么不是 Python 复刻：复刻一个字形位解码器再去「验证」版面，
@@ -285,6 +317,7 @@ ASCII 大写/数字  相对基线 -8..-1   高 8
   **改 UI 仍要照上面的模拟器流程先验一遍**——实机验证的是「已烧进去的那版」，
   不是「你正在写的那版」。
 - 待机时第 4 段是空的（用户标记「待定」）。
-- **桌面改造（拆分 + 桌面/图标/设置应用）还没烧过机。** 编译过、模拟器几何
-  验过，但「助手看不到屏幕」这条约束没变——烧上去之后要用户看过才算过。
-  已烧过并验证的是**拆分之前**那一版（胶囊进度条 + 开锁动画）。
+- ~~桌面改造还没烧过机~~ —— 2026-09-22 已作废：拆分 + 桌面 + 设置应用那一版
+  用户烧进去看过，屏幕正常。**下面这一版（状态栏 + 一行三格 + 网络应用）
+  还没烧过**，烧上去要用户看过才算过。
+- 网络应用（`app_net.ino`）整页都是占位，显示的「未接入」是实话不是 bug。

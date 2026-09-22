@@ -490,3 +490,13 @@ void lockDraw(uint32_t now) {
 const char *lockStatus(void) {
   return (state == ST_RUNNING) ? "RUNNING" : "IDLE  ";
 }
+
+// 桌面状态栏左边那两个字的数据源。和 lockStatus() 同一个理由：桌面文件排在
+// 本文件**之前**，看不见 state。
+//
+// 单独做一个 bool 而不是让桌面去比较 lockStatus() 的字符串：那样桌面就得
+// 知道 "RUNNING" 这个字面量，改日志措辞会把状态栏一起改坏。状态和日志是
+// 两件事，哪怕今天它们指向同一个变量。
+bool lockIsRunning(void) {
+  return state == ST_RUNNING;
+}

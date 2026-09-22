@@ -32,8 +32,9 @@
 #define ICON_H      16
 #define ICON_BYTES  (ICON_W * ICON_H / 8)   // 每个图标 32 字节
 
-extern const uint8_t ICON_LOCK[ICON_BYTES];
-extern const uint8_t ICON_GEAR[ICON_BYTES];
+extern const uint8_t ICON_LOCK[ICON_BYTES];   // 定时
+extern const uint8_t ICON_NET[ICON_BYTES];    // 网络
+extern const uint8_t ICON_GEAR[ICON_BYTES];   // 设置
 
 
 // ============================ 应用 ============================
@@ -42,7 +43,10 @@ extern const uint8_t ICON_GEAR[ICON_BYTES];
 // 虚基类要为每个派生类生成 vtable 并给每个实例加一个 vptr，换来的是本项目
 // 完全用不到的多态替换能力。
 struct App {
-  const char    *name;          // 桌面标签，UTF-8，≤3 个汉字（格子只有 42px 宽）
+  const char    *name;          // 桌面标签，UTF-8。**两个汉字**：格子 42px，
+                                // "定时" 实测 23px、"网络" 24px、"设置" 23px；
+                                // 三个汉字（"定时锁" 35px）也塞得下，但三个标签
+                                // 长短不一，三等分的网格看上去就不齐了。
   const uint8_t *icon;          // 16x16 点阵，低位在左
   const char *(*status)(void);  // 心跳日志用的一句话状态；没有就返回 ""
   void (*enter)(void);          // 进入时一次
@@ -60,7 +64,12 @@ struct App {
 
 // 应用表：**只放能从桌面启动的应用**。桌面自己不在表里 —— 它是这张表的
 // 视图，不该出现在自己的网格里。定义在主 .ino 里，这里只声明。
-#define APP_COUNT 2
+//
+// ⚠️ 桌面是**一行三格**（用户 2026-09-22 定的版面：状态栏 16px + 图标行 32px，
+// 第 4 段留空）。所以这个数**最大就是 3**：第 4 个应用得先改版面（翻页，或
+// 退回两行），不是把 3 改成 4 就完事 —— 那样第 4 格会画到 y48 的空白区里，
+// 而且第 1 格会被第 4 格绕回来覆盖。改之前先跑 tools/desktop_sim.py。
+#define APP_COUNT 3
 extern const App *const APPS[APP_COUNT];
 
 
@@ -95,11 +104,20 @@ void deskDraw(uint32_t now);
 
 // 定时锁（app_lock.ino）
 const char *lockStatus(void);
+bool lockIsRunning(void);     // 状态栏要用：桌面在最前面，读不到这个文件里的 static
 void lockEnter(void);
 void lockLeave(void);
 void lockTick(uint32_t now);
 void lockInput(uint32_t now);
 void lockDraw(uint32_t now);
+
+// 网络（app_net.ino）
+const char *netStatus(void);
+void netEnter(void);
+void netLeave(void);
+void netTick(uint32_t now);
+void netInput(uint32_t now);
+void netDraw(uint32_t now);
 
 // 设置（app_settings.ino）
 const char *setStatus(void);

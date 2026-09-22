@@ -1,19 +1,22 @@
 /*
  * app_settings.ino —— 设置应用
  *
- * 规划中的三页：蓝牙 / 网络 / 关于。现在**只有「关于」页** —— 另外两页要
- * 展示的是 BLE 配网和 WiFi 的真实状态，那些还没做，先做只能填假数据。
+ * 规划中是两页：**蓝牙 / 关于**。现在只有「关于」页 —— 蓝牙页要展示的是
+ * BLE 配网的真实状态，那还没做，先做只能填假数据。
  *
- * 加进来得早，是因为桌面网格需要第二个应用，否则 K1/K2 的循环选中根本
- * 没法测。翻页的骨架已经搭好（SET_PAGE_COUNT + setPage），加页就是改
- * 这个宏 + 在 setDraw 里加一个分支。
+ * 原来还规划过一个"网络页"，2026-09-22 用户改判：**网络升成桌面上的独立
+ * 应用**（app_net.ino），设置里不再有网络页。所以 SET_PAGE_COUNT 将来是
+ * 2 而不是 3。
+ *
+ * 翻页的骨架已经搭好（SET_PAGE_COUNT + setPage），加页就是改这个宏 +
+ * 在 setDraw 里加一个分支。
  *
  * 整个文件**没有一行处理 K4** —— 不消费那次单击，框架就当作"返回桌面"。
  * 这就是框架那套消费规则的回报：新应用忘了写返回也不会把用户困住。
  */
 
 // ============================ 配置区 ============================
-#define SET_PAGE_COUNT  1       // 页数。蓝牙页/网络页做出来后改成 3
+#define SET_PAGE_COUNT  1       // 页数。蓝牙页做出来后改成 2（网络页已移走）
 #define PAGE_ABOUT      0       // 页码：0 = 关于
 
 static uint8_t setPage = PAGE_ABOUT;
@@ -36,7 +39,7 @@ void setInput(uint32_t now) {
   (void)now;
 
   // K1/K2 翻页。SET_PAGE_COUNT 现在是 1，所以这两行是空转 —— 这是对的，
-  // 不是漏写：`(0 + 1 - 1) % 1 == 0`。页数改成 3 之后它们自动生效。
+  // 不是漏写：`(0 + 1 - 1) % 1 == 0`。页数改成 2 之后它们自动生效。
   if (btn[0].pressEdge) setPage = (uint8_t)((setPage + SET_PAGE_COUNT - 1) % SET_PAGE_COUNT);
   if (btn[1].pressEdge) setPage = (uint8_t)((setPage + 1) % SET_PAGE_COUNT);
 
