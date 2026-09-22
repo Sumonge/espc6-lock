@@ -8,7 +8,7 @@ XIAO ESP32C6 定时锁固件。单文件 `espc6-lock.ino`，约 650 行，无其
 ```bash
 CLI="/c/Program Files/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe"
 "$CLI" compile --fqbn esp32:esp32:XIAO_ESP32C6 --warnings all /c/Users/14919/Desktop/espc6-lock
-"$CLI" upload  -p COM4 --fqbn esp32:esp32:XIAO_ESP32C6 /c/Users/14919/Desktop/espc6-lock
+"$CLI" upload  -p COM5 --fqbn esp32:esp32:XIAO_ESP32C6 /c/Users/14919/Desktop/espc6-lock
 ```
 
 改动后**必须编译一遍**再交付，并报出 Flash / RAM 数字。已验证的环境：
@@ -27,7 +27,12 @@ CLI="/c/Program Files/Arduino IDE/resources/app/lib/backend/resources/arduino-cl
 - 引脚：`PIN_I2C_SDA 22` / `PIN_I2C_SCL 23` / `PIN_BTN1..4 = 0,1,2,21` / `PIN_SERVO 19`
 - 显示构造：`U8G2_SSD1306_128X64_NONAME_F_HW_I2C`，第 3、4 个参数必须显式传 SCL/SDA
   （本项目 I2C 不在芯片默认脚上，留空屏幕完全不亮）
-- 第 4 行（`TRACK_Y`）那条 1px 进度条，用户要求保留
+- 第 4 行那条进度条，用户要求保留（原为 1px 细线，2026-09-22 按要求改成
+  两端圆角的胶囊样式，见下方「坑 6」和 `drawTrackCapsule()`）
+- 解锁提示画面的开锁动画（`drawLock()`）：锁梁绕左腿根部转 **90°** 躺平
+  指向左，是用户指定的动作。`LOCK_OPEN_DEG` **不是风格旋钮**——小一点不叫
+  水平，大一点转到锁体下面去。要改观感调 `LOCK_ANIM_MS`。
+  它转到底时锁梁会横穿锁体内部，这是铰链没拔出来的必然结果，别去"修"。
 - 状态语义：计时状态不持久化，上电回开锁位（fail-open）
 
 ## 坑
@@ -114,6 +119,23 @@ Arduino 会给 `.ino` 里的函数自动生成原型并插到文件靠前的位�
 `drawBigTime()` 用 `u8g2.getStrWidth()` 量实际宽度再居中，不要按字符数估算——
 换任何字体都不会偏。
 
+### 6. 胶囊形状不能用 `drawRBox` / `drawRFrame`
+
+想画**两端是完整半圆**的胶囊（也就是 `r = h/2`）时，不能用这两个函数。
+它们把直边长度算成 `w-2r` / `h-2r`，而且**只在长度 >= 3 时才画那两条直边**
+（`src/clib/u8g2_box.c` 的 `u8g2_DrawRBox` / `u8g2_DrawRFrame`）。
+胶囊恰好让 `h-2r = 0`，直边整段被跳过，**两端反而各开一个缺口**。
+
+对策：两端用 `drawCircle()` 的象限位标志自己拼半圆，中间补两条 `drawHLine()`。
+四个象限是 `0x01~0x08` 的位标志（见 `u8g2.h`），可以 OR：
+
+```c
+u8g2.drawCircle(cx, cy, r, U8G2_DRAW_UPPER_LEFT | U8G2_DRAW_LOWER_LEFT);  // 左半圆
+```
+
+实心填充则用 `drawDisc()` + `drawBox()` 拼，别用 `drawRBox()`。
+第 4 行的进度条就是这么画的（`drawTrackCapsule()` / `drawFillCapsule()`）。
+
 ## 代码约定
 
 - **注释用中文**，且写**为什么**不写**是什么**。凡是「这里看着可以简化但不行」
@@ -136,6 +158,6 @@ Arduino 会给 `.ino` 里的函数自动生成原型并插到文件靠前的位�
 
 - **`SERVO_US_UNLOCK` / `SERVO_US_LOCK`（1000 / 2000 µs）从没在实机上标定过**，
   是按常见舵机给的估值。装上拨片后必须实测行程来调。
-- 下面这些形状全是**算出来的，没人看过**：脚丫点阵、羽毛、四条 16px 分段的
-  版面布局。真机上如果糊成一团或位置偏移，属正常，按实际观感调。
+- ~~下面这些形状全是算出来的，没人看过~~ —— 2026-09-22 已作废：屏幕点亮、
+  显示正常，脚丫点阵 / 羽毛 / 四条 16px 分段的版面用户均已看过。
 - 待机时第 4 段是空的（用户标记「待定」）。
