@@ -39,7 +39,12 @@ void drawBigTime(uint32_t totalSecs) {
            (unsigned)(totalSecs % 60));
 
   u8g2.setFont(BIG_FONT);
-  // 用 getStrWidth 量实际宽度再居中，这样换任何字体都不会偏
+  // 用实测宽度再居中，这样换任何字体都不会偏。
+  //
+  // 这里**故意**用 getStrWidth 而不是 getUTF8Width：buf 是 snprintf 出来的
+  // 纯 ASCII（数字和冒号），两种量宽结果完全一样。反过来，哪天真往这个
+  // buf 里塞了汉字，就得换成 getUTF8Width —— 分界线是"串里有没有汉字"，
+  // 不是"函数看起来哪个更现代"。规则和理由见 CLAUDE.md 坑 7。
   int x = (128 - (int)u8g2.getStrWidth(buf)) / 2;
   if (x < 0) x = 0;
   u8g2.drawStr(x, BIG_TIME_BASE, buf);

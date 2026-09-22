@@ -14,3 +14,6 @@ __pycache__/
 *.pyc
 Thumbs.db
 desktop.ini
+
+# tools/fontcheck 编出来的主机探针（源码进版本控制，二进制不进）
+tools/fontcheck/*.exe

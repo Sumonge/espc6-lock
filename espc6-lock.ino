@@ -5,27 +5,35 @@
  * 执行器：舵机 + 机械拨片
  *
  * ============================ 结构 ============================
- * 这个文件是**框架**：硬件初始化、按键、K4 整形、应用到绘制的分发、
- * setup/loop。具体功能在各自的应用文件里：
+ * 这个文件是**框架**：硬件初始化、按键、K4 整形、启动画面、应用到绘制的
+ * 分发、setup/loop。具体功能在各自的应用文件里：
  *
  *   app.h            框架与应用之间唯一的共享头（改之前先读它的开头注释）
+ *   app_desktop.ino  桌面：3x2 图标网格
  *   app_lock.ino     定时锁应用
+ *   app_settings.ino 设置应用
+ *   icons.ino        图标点阵
  *   ui_kit.ino       共用绘制工具（段版面、大号文字）
  *
  * 拼接顺序是「主文件在最前，其余按字母序」，所以后面那些文件能看到这里的
  * 一切，反过来不行 —— 主文件要用后面文件里的东西，必须在 app.h 里声明。
  *
  * ============================ 功能 ============================
- *   纯倒计时时间锁，无密码。
+ *   老式功能机那样的桌面：一张 3x2 图标网格，用 K1/K2 选、K3 进、K4 返回。
+ *   现在网格里有两个应用：
+ *
+ *   定时锁 —— 纯倒计时时间锁，无密码。
  *   空闲(开锁) --K3启动--> 倒计时中(锁定) --归零--> 空闲(开锁)
  *
- *   时长设定：K1 增加 / K2 减少
- *            单击 1 分钟，长按自动加速（1 → 5 → 15 分钟/次）
- *            双击直接跳 1 小时
- *            K3 启动倒计时
- *            K4 归零重设
- *   倒计时中：K4 长按满 5 秒才能取消（防误触）
- *             按住期间画面切成"紧急解锁中"+ 羽毛向右飘的进度条
+ *     时长设定：K1 增加 / K2 减少
+ *              单击 1 分钟，长按自动加速（1 → 5 → 15 分钟/次）
+ *              双击直接跳 1 小时
+ *              K3 启动倒计时
+ *              K4 归零重设
+ *     倒计时中：K4 长按满 5 秒才能取消（防误触）
+ *               按住期间画面切成"紧急解锁中"+ 羽毛向右飘的进度条
+ *
+ *   设置 —— 目前只有「关于」页。
  *
  *   !! 设计前提：计时状态不保存 !!
  *   上电后一律回到「空闲 = 开锁位」。也就是说拔电重启即可绕过锁定，
@@ -108,6 +116,12 @@ static const char*   BTN_NAMES[4] = { "K1", "K2", "K3", "K4" };
 
 // ---------- 框架 ----------
 #define UI_REFRESH_MS          50  // 屏幕刷新周期
+#define STARTUP_MS           1500  // 启动画面停留多久后进桌面
+
+// 版本号：只出现在启动画面和「设置 → 关于」页上。
+// 它**不是**烧录与否的证据 —— 忘了改版本号太常见了，判断烧没烧进去要看
+// 关于页的 __DATE__（编译时刻）和固件字节数。
+#define FW_VERSION           "1.0"
 
 // ---------- 显示 ----------
 // 中文字体：U8g2 的文泉驿点阵字体，必须配合 drawUTF8() 使用（drawStr 不行）。
@@ -259,31 +273,50 @@ static inline void servoLock()   { servoWriteUs(SERVO_US_LOCK);   }
 // ==================================================================
 //  应用表
 // ==================================================================
-// 加一个应用 = 在这里加一行 + 在 app.h 里声明它的五个函数。
-// APP_COUNT 在 app.h 里，改的时候两处一起改。
+// 加一个应用 = 在这里加一行 + 在 app.h 里声明它的六个函数 + 改 APP_COUNT。
+//
+// 顺序就是桌面网格里的顺序（按行优先铺）。定时锁放第一格：它是这块板子
+// 存在的理由，桌面光标也默认停在它上面。
 static const App APP_LOCK = {
-  "定时锁", lockStatus,
+  "定时锁", ICON_LOCK, lockStatus,
   lockEnter, lockLeave, lockTick, lockInput, lockDraw,
 };
 
-const App *const APPS[APP_COUNT] = { &APP_LOCK };
+static const App APP_SETTINGS = {
+  "设置", ICON_GEAR, setStatus,
+  setEnter, setLeave, setTick, setInput, setDraw,
+};
 
-static const App *curApp = nullptr;   // 永不为空 —— 但也要等 appOpen() 之后才算数
+const App *const APPS[APP_COUNT] = { &APP_LOCK, &APP_SETTINGS };
 
-void appOpen(uint8_t idx) {
-  if (idx >= APP_COUNT) return;
+// 桌面**不在 APPS[] 里**：它不该出现在自己的网格中。它是那张表的视图，
+// 不是表里的一项。它的 icon 字段永远不会被画（桌面不画自己），但也不能
+// 留空 —— 留个空指针等于给未来的自己埋一颗雷。
+static const App APP_DESKTOP = {
+  "桌面", ICON_LOCK, deskStatus,
+  deskEnter, deskLeave, deskTick, deskInput, deskDraw,
+};
+
+// 永不为空（appOpen 之后）。用指针而不是下标，"桌面"才能和 APPS[] 里
+// 那些应用平起平坐 —— 框架不需要知道桌面是特殊的。
+static const App *curApp = nullptr;
+
+// 所有切换都走这里，好处是"已经在里面就不动"这条幂等规则只有一处实现。
+// appBackToDesktop() 的幂等性就靠它 —— 用户连续按两次返回不能有副作用。
+static void appSwitch(const App *a) {
+  if (curApp == a) return;
   if (curApp) curApp->leave();
-  curApp = APPS[idx];
+  curApp = a;
   curApp->enter();
   Serial.printf("[app ] 进入 %s\n", curApp->name);
 }
 
-void appBackToDesktop(void) {
-  // 桌面应用还没做（Step 2）。在这之前"返回"是个空操作。
-  //
-  // 这个函数**必须幂等**：用户已经在桌面时再"返回"一次不能有任何副作用。
-  // 等桌面加进来，这里改成 appOpen(APP_IDX_DESKTOP) 时也要保住这一点。
+void appOpen(uint8_t idx) {
+  if (idx >= APP_COUNT) return;
+  appSwitch(APPS[idx]);
 }
+
+void appBackToDesktop(void) { appSwitch(&APP_DESKTOP); }
 
 
 // ==================================================================
@@ -359,13 +392,47 @@ static void k4Shape(uint32_t now) {
 
 
 // ==================================================================
+//  启动画面
+// ==================================================================
+// 开机先显示一两秒再进桌面。这是**框架层**的东西，不是某个应用的一屏 ——
+// 所以它不占 curApp（那会让"当前应用"在开机瞬间变成一个不存在的东西），
+// 而是单独一个标志。
+//
+// 这段时间里按键不进应用：用户完全可能在上电的同一瞬间就在按 K3。
+static bool     startupOn   = true;
+static uint32_t startupAtMs = 0;
+
+static void drawSplash(void) {
+  u8g2.drawXBMP((128 - ICON_W) / 2, 10, ICON_W, ICON_H, ICON_LOCK);
+
+  // 标题用中文字体。**不能**用 BIG_FONT —— 那是 logisoso24_tn，_tn 后缀
+  // 表示只含数字和 " .:-"，画字母会得到一片空白。
+  // 含中文的串必须 getUTF8Width（见 CLAUDE.md 坑 7）。标题真宽 64，居中
+  // 起点 x=32。
+  u8g2.setFont(CN_FONT);
+  const char *title = "KHW 定时锁";
+  u8g2.drawUTF8((128 - (int)u8g2.getUTF8Width(title)) / 2, 42, title);
+
+  // 编译时刻。和「设置 → 关于」页那一行是同一个来源：两边对不上就说明
+  // 屏幕上这块板子跑的不是这次编译出来的固件。
+  // 这一行是纯 ASCII，两种量宽结果一样（utf8_next 对 ASCII 和 ascii_next
+  // 行为相同）；统一用 getUTF8Width 是为了让"配 drawUTF8 就用 UTF8Width"
+  // 这条规则没有例外，不必每次去判断串里有没有汉字。
+  char buf[32];
+  snprintf(buf, sizeof(buf), "v%s  %s", FW_VERSION, __DATE__);
+  u8g2.drawUTF8((128 - (int)u8g2.getUTF8Width(buf)) / 2, 57, buf);
+}
+
+
+// ==================================================================
 //  绘制分发
 // ==================================================================
 // clearBuffer / sendBuffer 由框架负责，应用只画内容 —— 这样应用不可能忘记
 // 提交，也不会出现两次 1024 字节 @400kHz ≈ 23ms 的 I2C 传输。
 static void drawFrame(uint32_t now) {
   u8g2.clearBuffer();
-  if (curApp) curApp->draw(now);
+  if (startupOn)        drawSplash();
+  else if (curApp)      curApp->draw(now);
   u8g2.sendBuffer();
 }
 
@@ -414,6 +481,23 @@ void setup() {
   u8g2.begin();
   Serial.println(F("[oled] U8g2 初始化完成 @400000Hz (地址固定 0x3C)"));
 
+  // 字体实测量宽。drawBand() 从 x=2 起画，所以一行文字最多 126px 可用；
+  // 版面估算全靠这两个数（汉字宽 / ASCII 宽），别凭字号猜。
+  //
+  // 每个数都用**和绘图时同一个**量宽函数：汉字走 getUTF8Width，ASCII 走
+  // getStrWidth。这里若图省事都给 getStrWidth，汉字那一栏会打出 0 —— 因为
+  // "字"被当成三个独立字节去查字形，查不到就返回 0（CLAUDE.md 坑 7）。
+  // 一个报错的探针比没有探针更坏：它会让人以为"汉字宽是 0，版面很宽松"。
+  //
+  // 主机的参考值（tools/fontcheck，与固件同一份 u8g2_font.c 编出来的）：
+  //     汉字 字=11   ASCII 0=5   行高=13   ascent=8  descent=-2
+  // 板上打出来和这行对不上，就说明字体宏或 u8g2 版本被动过了。
+  u8g2.setFont(CN_FONT);
+  Serial.printf("[font] 汉字宽=%u  ASCII宽=%u  行高=%u\n",
+                (unsigned)u8g2.getUTF8Width("字"),
+                (unsigned)u8g2.getStrWidth("0"),
+                (unsigned)u8g2.getMaxCharHeight());
+
   // ---------- 舵机 ----------
   servoInit();
   servoUnlock();   // 上电即开锁位 —— 与"不保存计时状态"的设计一致
@@ -421,12 +505,14 @@ void setup() {
                 PIN_SERVO, SERVO_US_UNLOCK);
 
   // ---------- 应用 ----------
-  appOpen(0);      // 目前只有定时锁；桌面在 Step 2 加进来
+  appBackToDesktop();        // 开机落在桌面，启动画面结束后就能用
+  startupAtMs = millis();
 
   Serial.println(F("----------------------------------------"));
-  Serial.println(F("[ui  ] K1 加 / K2 减 / K3 启动 / K4 归零"));
-  Serial.println(F("[ui  ] 单击 1 分钟，长按加速，双击跳 1 小时"));
-  Serial.println(F("[ui  ] 倒计时中长按 K4 满 5 秒可取消"));
+  Serial.println(F("[ui  ] 桌面：K1/K2 选  K3 进入  K4 返回"));
+  Serial.println(F("[ui  ] 定时锁：K1 加 / K2 减 / K3 启动 / K4 归零"));
+  Serial.println(F("[ui  ]           单击 1 分钟，长按加速，双击跳 1 小时"));
+  Serial.println(F("[ui  ]           倒计时中长按 K4 满 5 秒可取消"));
   Serial.println(F("----------------------------------------"));
 }
 
@@ -452,7 +538,18 @@ void loop() {
   // K4 必须先整形，再交给应用 —— 顺序反了应用就会看到未处理的原始边沿
   k4Shape(now);
 
-  if (curApp) {
+  // 启动画面到点就散场。判断放在输入分发之前，这一帧就能落到桌面上。
+  if (startupOn && (uint32_t)(now - startupAtMs) >= STARTUP_MS) {
+    startupOn = false;
+    Serial.println(F("[boot] 启动画面结束，进入桌面"));
+  }
+
+  if (startupOn) {
+    // 启动画面期间按键不进应用 —— 用户完全可能在上电的同一瞬间就在按 K3。
+    // 这里把整形器已经攒下的单击一并丢掉，免得这一帧攒的 tap 在画面
+    // 结束后的第一帧补发出去。
+    k4TapPending = false;
+  } else if (curApp) {
     curApp->input(now);
 
     // 应用没把这次单击取走，就当作"返回桌面"。

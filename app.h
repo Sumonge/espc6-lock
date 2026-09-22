@@ -22,12 +22,28 @@
 #pragma once
 #include <stdint.h>
 
+// ============================ 图标点阵 ============================
+// 所有应用图标统一 16x16、**低位在左**（U8g2 的 drawXBMP 就是这么读的，
+// 见 CLAUDE.md 坑 1 和 icons.ino 开头的说明）。32 字节，进 .rodata。
+//
+// 在这里声明是因为应用表定义在主 .ino（排最前），而点阵定义在 icons.ino
+// （排后面）—— 拼接顺序决定了主 .ino 看不见它。
+#define ICON_W      16
+#define ICON_H      16
+#define ICON_BYTES  (ICON_W * ICON_H / 8)   // 每个图标 32 字节
+
+extern const uint8_t ICON_LOCK[ICON_BYTES];
+extern const uint8_t ICON_GEAR[ICON_BYTES];
+
+
+// ============================ 应用 ============================
 // 一个应用要提供的全部东西。函数指针而不是虚基类：
 // APPS[] 是编译期常量表，整体落在 .rodata（Flash），零 RAM、零启动开销；
 // 虚基类要为每个派生类生成 vtable 并给每个实例加一个 vptr，换来的是本项目
 // 完全用不到的多态替换能力。
 struct App {
-  const char *name;             // 桌面标签，UTF-8
+  const char    *name;          // 桌面标签，UTF-8，≤3 个汉字（格子只有 42px 宽）
+  const uint8_t *icon;          // 16x16 点阵，低位在左
   const char *(*status)(void);  // 心跳日志用的一句话状态；没有就返回 ""
   void (*enter)(void);          // 进入时一次
   void (*leave)(void);          // 离开时一次（挂起状态要在这里清干净）
@@ -42,9 +58,11 @@ struct App {
 // draw 不负责 clearBuffer / sendBuffer —— 框架在前后各做一次。这样应用不可能
 // 忘记 sendBuffer，也不会出现两次 1024 字节 @400kHz ≈ 23ms 的 I2C 传输。
 
-// 应用表。定义在主 .ino 里，这里只声明（桌面应用要遍历它）。
-#define APP_COUNT 1
+// 应用表：**只放能从桌面启动的应用**。桌面自己不在表里 —— 它是这张表的
+// 视图，不该出现在自己的网格里。定义在主 .ino 里，这里只声明。
+#define APP_COUNT 2
 extern const App *const APPS[APP_COUNT];
+
 
 // ============================ 框架 API ============================
 void appOpen(uint8_t idx);        // 切到 APPS[idx]
@@ -58,17 +76,35 @@ uint32_t k4HeldMs(uint32_t now);  // K4 已按住多久（长按语义照旧用�
 //   长按   —— 不发 tap，应用用 k4HeldMs() 自己判
 // 详细规则和理由见主 .ino 的 k4Shape()。
 
+
 // ============================ 共用绘制（ui_kit.ino） ============================
 // 在这里声明而不是让 ui_kit.ino 里 static：.ino 按字母序拼接，ui_kit 排最后，
 // 排在它前面的 app_lock.ino 就要用这两个函数了。
 void drawBand(int i, const char *s);
 void drawBigTime(uint32_t totalSecs);
 
+
 // ============================ 各应用 ============================
-// 定时锁
+// 桌面（app_desktop.ino）
+const char *deskStatus(void);
+void deskEnter(void);
+void deskLeave(void);
+void deskTick(uint32_t now);
+void deskInput(uint32_t now);
+void deskDraw(uint32_t now);
+
+// 定时锁（app_lock.ino）
 const char *lockStatus(void);
 void lockEnter(void);
 void lockLeave(void);
 void lockTick(uint32_t now);
 void lockInput(uint32_t now);
 void lockDraw(uint32_t now);
+
+// 设置（app_settings.ino）
+const char *setStatus(void);
+void setEnter(void);
+void setLeave(void);
+void setTick(uint32_t now);
+void setInput(uint32_t now);
+void setDraw(uint32_t now);

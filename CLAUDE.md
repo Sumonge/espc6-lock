@@ -1,6 +1,7 @@
 # CLAUDE.md
 
-XIAO ESP32C6 定时锁固件。单文件 `espc6-lock.ino`，约 650 行，无其他源文件。
+XIAO ESP32C6 定时锁固件。**多文件** `.ino`，`espc6-lock.ino` 是主文件，
+其余按字母序拼接（见「多文件」一节）。
 面向人的说明在 `README.md`，这里只记**约定**和**踩过的坑**。
 
 ## 编译 / 烧录
@@ -17,7 +18,16 @@ CLI="/c/Program Files/Arduino IDE/resources/app/lib/backend/resources/arduino-cl
 |---|---|
 | esp32 core | 3.3.11 |
 | U8g2 | 2.36.19（`C:\Users\14919\Documents\Arduino\libraries\U8g2`） |
-| 编译基线 | 502894 字节 (38%) Flash / 17020 字节 (5%) RAM |
+| 编译基线 | 513824 字节 (39%) Flash / 17044 字节 (5%) RAM —— **默认分区** |
+
+基线会随功能走，改完就更新上表。切到 `huge_app` 之后（计划 Step 4）报数要
+**同时给分区名和余量绝对值**——`huge_app` 下百分比会突然变小，只报百分比
+会看不出真实变化：
+
+```bash
+# 切分区之后编译要加这一项，否则会莫名装不下
+"$CLI" compile --fqbn esp32:esp32:XIAO_ESP32C6:PartitionScheme=huge_app ...
+```
 
 ## 不要动的东西
 
@@ -94,8 +104,13 @@ Arduino 会给 `.ino` 里的函数自动生成原型并插到文件靠前的位�
 **参数或返回类型是本文件后面才定义的**，生成的原型会报
 `error: 'X' has not been declared`。
 
-本项目的对策：`UNLOCK_TIMEOUT` / `UNLOCK_MANUAL` 用 `#define` 而不是 `enum`，
-就是为了让 `enterIdle(uint32_t, bool)` 的原型能正常生成。
+**现在的正解是 `app.h`**：所有共享类型放那一个头文件，并在 `espc6-lock.ino`
+的**最顶部**第一个 include——原型插在「第一条 include 之后」，类型在那个点
+已经声明完了，这个坑就不存在了。
+
+`UNLOCK_TIMEOUT` / `UNLOCK_MANUAL` 至今仍是 `#define` 而不是 `enum`，那是
+单文件时代的遗留对策，改成 enum 放进 `app.h` 也可以，只是没坏就别动。
+真正还在生效的是「多文件」那三条硬规则，别只记这一条。
 
 ### 4. 中文必须 `drawUTF8()`
 
@@ -116,8 +131,11 @@ Arduino 会给 `.ino` 里的函数自动生成原型并插到文件靠前的位�
 
 ### 5. 大数字居中要量宽度
 
-`drawBigTime()` 用 `u8g2.getStrWidth()` 量实际宽度再居中，不要按字符数估算——
-换任何字体都不会偏。
+`drawBigTime()` 量实际宽度再居中，不要按字符数估算——换任何字体都不会偏。
+
+**但要用对量宽函数**，否则「量了宽度」反而是错的。分界线是串里有没有汉字，
+见坑 7。`drawBigTime()` 的 buf 是 snprintf 出来的纯 ASCII，所以它用
+`getStrWidth()` 是对的，不是漏改。
 
 ### 6. 胶囊形状不能用 `drawRBox` / `drawRFrame`
 
@@ -135,6 +153,109 @@ u8g2.drawCircle(cx, cy, r, U8G2_DRAW_UPPER_LEFT | U8G2_DRAW_LOWER_LEFT);  // 左
 
 实心填充则用 `drawDisc()` + `drawBox()` 拼，别用 `drawRBox()`。
 第 4 行的进度条就是这么画的（`drawTrackCapsule()` / `drawFillCapsule()`）。
+
+### 7. 量中文宽度必须 `getUTF8Width()`，`getStrWidth()` 给的是垃圾值
+
+**凡是配 `drawUTF8()` 用的宽度，一律 `getUTF8Width()`。**
+`getStrWidth()` 是 ASCII-only 的：
+
+```c
+// u8g2_font.c:1524
+u8g2_uint_t u8g2_GetStrWidth(u8g2_t *u8g2, const char *s) {
+  u8g2->u8x8.next_cb = u8x8_ascii_next;
+  return u8g2_string_width(u8g2, s);
+}
+// u8g2_font.c:1548
+u8g2_uint_t u8g2_GetUTF8Width(u8g2_t *u8g2, const char *str) {
+  u8g2->u8x8.next_cb = u8x8_utf8_next;
+  return u8g2_string_width(u8g2, str);
+}
+```
+
+而 `u8x8_ascii_next()`（`u8x8_8x8.c`）是**原样返回每个字节**：
+
+```c
+uint16_t u8x8_ascii_next(u8x8_t *u8x8, uint8_t b) {
+  if ( b == 0 || b == '\n' ) return 0x0ffff;
+  return b;                      // ← 字节即字形编码
+}
+```
+
+于是 UTF-8 的「定时锁」（9 字节）被当成 9 个独立字形编码 0xE5/0xAE/0x9A/…
+去查表，全都查不到。**查不到时 `u8g2_GetGlyphHorizontalProperties()` 直接
+return，压根不写它的出参**，`u8g2_string_width` 就拿着一堆**未初始化的栈变量**
+继续累加——不只是数值错，是 UB，每次都可能不一样。
+
+实测（`tools/fontcheck`，同一份 U8g2 源码在主机上编的）：
+
+| 串 | `getStrWidth` | `getUTF8Width` |
+|---|---|---|
+| `"字"` | **0** | 11 |
+| `"定时锁"` | **11** | 35 |
+| `"KHW 定时锁"` | **40** | 64 |
+
+按 11 给「定时锁」在 42px 格子里居中 → 起点 x+15，实际墨迹 35px → **压到右
+邻格**。这类错在屏幕上不显眼（就是"标签有点偏"），但网格铺满时一眼就看出
+串格了。
+
+已按此改过的调用点：`deskDraw()` 的标签、`drawSplash()` 的两行、
+`setup()` 里那条 `[font]` 探针（探针尤其危险——它若打 0，会让人以为
+「汉字宽是 0，版面很宽松」，一个报错的探针比没有探针更坏）。
+
+## 多文件
+
+`.ino` 的拼接规则：**主文件（与文件夹同名）排在最前，其余按字母序**，
+全部合成**一个编译单元**。本项目的实际顺序：
+
+```
+espc6-lock.ino → app_desktop.ino → app_lock.ino → app_settings.ino
+              → icons.ino → net_lock.ino → ui_kit.ino
+```
+
+后果是：宏和 `static` 名字**只对文本上排在它后面的文件可见**。主 `.ino` 排在
+最前，所以它**看不见**任何后面文件里的东西，除非在 `app.h` 里声明。
+
+三条硬规则：
+
+1. **共享类型只放 `app.h`，并在主 `.ino` 最顶部第一个 include。**（见坑 3）
+2. **函数签名只用内建类型或 `app.h` 里的类型。** 这样即使 arduino-cli 的原型
+   插入点算错也伤不到我们——所以 `appOpen()` 收的是下标 `uint8_t`，不是
+   `const App *`。
+3. **所有 `static` 函数/变量必须带应用前缀**（`lock*` / `desk*` / `set*`）。
+   共用一个命名空间，两个文件各写一个 `static void enter()` 会直接重定义报错。
+   **这是强制要求，不是风格。**
+
+另外两条容易忘的：
+
+- 常量数组要在 `app.h` 里 `extern` 声明 + 在 `.ino` 里**不带 `static`** 定义。
+  写成 `static` 会得到 `'X' was declared 'extern' and later 'static'`。
+  不带 `static` 的 const 数组进 `.rodata`（Flash），不占 RAM。
+- `.ino` 而不是 `.cpp` 是有意的：`.cpp` 会把 `u8g2` 和配置区的宏挡在外面。
+- **别在 sketch 目录下建子目录放 `.c/.cpp`**（除非叫 `src/`）。Arduino 会把
+  某些子目录当成独立 sketch。`tools/fontcheck/` 目前安全——已验证它不会被
+  编进固件，多出来的 `main()` 没造成重复定义。
+
+## 几何验证工具
+
+助手**看不到屏幕**，所以版面的每一步都要先用工具量出来。两个都在 `tools/`：
+
+| 工具 | 作用 |
+|---|---|
+| `python tools/desktop_sim.py` | 桌面网格几何自检（越界 / 图标与标签重叠 / 标签装不装得下）。辅助模式：`gen` 生成点阵十六进制、`full` 打印整屏 ASCII |
+| `bash tools/fontcheck/run.sh` | **真字模**量宽与墨迹盒。在主机上编译 U8g2 自己的 `u8g2_font.c`，调真正的 `u8g2_GetUTF8Width()` / `DrawUTF8()` |
+
+`fontcheck` 为什么不是 Python 复刻：复刻一个字形位解码器再去「验证」版面，
+等于用一把可能错的尺子量东西——尺子错了，「量出来刚好合适」比不量更危险。
+这里用的是和固件**逐字节同一份**源码，只换编译器。
+
+已实测的字模数字（`u8g2_font_wqy12_t_gb2312`）：
+
+```
+ascent=8  descent=-2  max_char_height=13（整个字体最高的字形，别拿它留余量）
+汉字墨迹   相对基线 -10..0   高 11   单字宽 11，步进约 12
+ASCII 大写/数字  相对基线 -8..-1   高 8
+带下伸部的字母(p/g)  到 +1
+```
 
 ## 代码约定
 
@@ -164,3 +285,6 @@ u8g2.drawCircle(cx, cy, r, U8G2_DRAW_UPPER_LEFT | U8G2_DRAW_LOWER_LEFT);  // 左
   **改 UI 仍要照上面的模拟器流程先验一遍**——实机验证的是「已烧进去的那版」，
   不是「你正在写的那版」。
 - 待机时第 4 段是空的（用户标记「待定」）。
+- **桌面改造（拆分 + 桌面/图标/设置应用）还没烧过机。** 编译过、模拟器几何
+  验过，但「助手看不到屏幕」这条约束没变——烧上去之后要用户看过才算过。
+  已烧过并验证的是**拆分之前**那一版（胶囊进度条 + 开锁动画）。
