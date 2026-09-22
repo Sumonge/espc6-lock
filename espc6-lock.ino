@@ -69,6 +69,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <U8g2lib.h>
+#include <Preferences.h>   // 设备名存 NVS（只有它在用；WiFi 凭据 Step 7 才来）
+#include <esp_random.h>    // esp_random()：硬件随机源，给设备名用
 #include "app.h"      // 必须在最顶上：自动生成的函数原型要能看见这里的类型
 
 // ==================================================================
@@ -277,6 +279,81 @@ static void servoWriteUs(uint16_t us) {
 
 static inline void servoUnlock() { servoWriteUs(SERVO_US_UNLOCK); }
 static inline void servoLock()   { servoWriteUs(SERVO_US_LOCK);   }
+
+
+// ==================================================================
+//  设备名
+// ==================================================================
+// 形如 LM-4K7-X9Q。**上电随机生成一次，然后写进 NVS 固定下来**，不是每次
+// 开机都换一个新名字 —— 设备名是用来在手机、路由器列表里认出这块板子的，
+// 每次重启都变就等于没有名字。
+//
+// 放在框架层而不是 app_net.ino 里：它是**设备属性**（和 FW_VERSION 同类），
+// 不是「网络应用」的私事。将来 BLE 广播名（Step 5）和 mDNS 主机名（Step 7）
+// 都要用它，那时候服务层在 net_lock.ino，排在 app_net.ino 后面 —— 从那个
+// 位置回头去取一个应用文件里的 static 是取不到的。
+//
+// 随机源用 esp_random()（ESP32 的硬件随机数），不用 Arduino 的 random()。
+// 后者在这个 core 里其实也是 esp_random 兜底，但那是实现细节；直接写明
+// 意图，换 core 版本时不会悄悄变成一个种子固定的伪随机。
+#define DEVNAME_NS       "khwlock"   // NVS 命名空间
+#define DEVNAME_KEY      "devname"   // NVS 键名
+#define DEVNAME_PREFIX   "LM"        // 固定前缀
+#define DEVNAME_GROUPS   2           // 破折号分组的组数
+#define DEVNAME_GLEN     3           // 每组几个随机字符
+
+// 字符集：0-9 + A-Z 共 36 个。用户要求"字母只能是大写"，所以没有小写。
+// 6 个随机位 = 36^6 ≈ 22 亿种，撞名不可能。
+//
+// 真要改成"去掉 0/O、1/I 这类看错的字符"（32 个），就改这一行 —— 别顺手
+// 改，用户给的例子 LM-XXX-XXX 没提这回事。
+#define DEVNAME_CHARSET  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+#define DEVNAME_CAP  (8 + DEVNAME_GROUPS * (1 + DEVNAME_GLEN) + 1)
+
+static char devName[DEVNAME_CAP] = { 0 };
+
+// 就地填一个随机名。手写循环而不是 snprintf：snprintf 返回的是"本该写多长"，
+// 一旦超出 cap 就会在 n 上越过缓冲区继续累加，越界写。这里每个字符都先
+// 检查 cap，边界条件只有一个。
+static void devNameFill(char *out, size_t cap) {
+  const size_t ncs = sizeof(DEVNAME_CHARSET) - 1;
+  size_t n = 0;
+
+  for (const char *p = DEVNAME_PREFIX; *p && n + 1 < cap; p++) out[n++] = *p;
+  for (int g = 0; g < DEVNAME_GROUPS && n + 1 < cap; g++) {
+    out[n++] = '-';
+    for (int k = 0; k < DEVNAME_GLEN && n + 1 < cap; k++) {
+      out[n++] = DEVNAME_CHARSET[esp_random() % ncs];
+    }
+  }
+  out[n] = '\0';
+}
+
+static void devNameInit(void) {
+  Preferences prefs;
+
+  // 先只用只读方式开一次。分开写不是因为只读更快，是因为**只读句柄上
+  // putString 是不生效的** —— 把"读"和"读到空就写"混在同一个句柄里，
+  // 很容易写出一个"读到了空、也写了、但写的没落盘"的半截逻辑。
+  if (prefs.begin(DEVNAME_NS, true)) {
+    const size_t got = prefs.getString(DEVNAME_KEY, devName, sizeof(devName));
+    prefs.end();
+    if (got > 0) return;      // 已经起过名了，沿用
+  }
+
+  devNameFill(devName, sizeof(devName));
+
+  if (prefs.begin(DEVNAME_NS, false)) {
+    prefs.putString(DEVNAME_KEY, devName);
+    prefs.end();
+  }
+  // 存不进去也**不能**在这里卡住或报错退出：这次的名字留在 RAM 里照样能用，
+  // 只是下次开机会换一个。开机路径上的东西不能因为 NVS 出问题就停摆。
+}
+
+// 给 app_net.ino 显示用。主 .ino 排在最前，声明在 app.h 里即可。
+const char *deviceName(void) { return devName; }
 
 
 // ==================================================================
@@ -521,12 +598,18 @@ void setup() {
   Serial.printf("[servo] GPIO%d 初始化完成，上电位于开锁位 (%uus)\n",
                 PIN_SERVO, SERVO_US_UNLOCK);
 
+  // ---------- 设备名 ----------
+  // 放在 servoUnlock() **之后**：第一次开机会写一次 NVS，那是几十毫秒的
+  // 活儿，不能挡在"上电即开锁"前面。同一个理由让将来 bleInit() 也排最后。
+  devNameInit();
+  Serial.printf("[name] 设备名 %s\n", devName);
+
   // ---------- 应用 ----------
   appBackToDesktop();        // 开机落在桌面，启动画面结束后就能用
   startupAtMs = millis();
 
   Serial.println(F("----------------------------------------"));
-  Serial.println(F("[ui  ] 桌面：K1/K2 选  K3 进入  K4 返回"));
+  Serial.println(F("[ui  ] 桌面：K1 右移  K2 左移  K3 进入  K4 返回"));
   Serial.println(F("[ui  ] 定时锁：K1 加 / K2 减 / K3 启动 / K4 归零"));
   Serial.println(F("[ui  ]           单击 1 分钟，长按加速，双击跳 1 小时"));
   Serial.println(F("[ui  ]           倒计时中长按 K4 满 5 秒可取消"));

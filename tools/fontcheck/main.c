@@ -42,6 +42,15 @@ int main(void) {
   row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "网络");
   row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "定时锁");
 
+  printf("\n== 网络页（drawBand 从 x=2 起，一行最多 126px）==\n");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "设备  LM-4K7-X9Q");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "设备  LM-WWW-999");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "名称  LM-4K7-X9Q");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "无线  未接入");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "配网  未接入");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "LM-4K7-X9Q");
+  row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "LM-WWW-WWW");
+
   printf("\n== 状态栏（y0..15，左 2px 起）==\n");
   row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "已锁");
   row("wqy12_gb2312", u8g2_font_wqy12_t_gb2312, "开锁");

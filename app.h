@@ -93,6 +93,13 @@ void drawBand(int i, const char *s);
 void drawBigTime(uint32_t totalSecs);
 
 
+// ============================ 设备属性 ============================
+// 设备名（形如 LM-4K7-X9Q）：上电随机生成一次后写进 NVS 固定。定义在主 .ino
+// 里 —— 那是设备级的东西，不是某个应用的私事。将来 BLE 广播名和 mDNS 主机名
+// 都要用它。
+const char *deviceName(void);
+
+
 // ============================ 各应用 ============================
 // 桌面（app_desktop.ino）
 const char *deskStatus(void);

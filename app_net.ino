@@ -1,9 +1,14 @@
 /*
  * app_net.ino —— 网络应用
  *
- * ⚠️ 现在是一块**占位**：WiFi / BLE 配网要到计划里的 Step 5~7 才做
- * （服务层放 net_lock.ino，本文件只负责画）。所以这一页显示的每一项都是
- * "未接入"，那不是 bug，是实话。
+ * 四段版面：
+ *   第 1 段  标题「网络」（分隔线以上，和设置页同一个版式）
+ *   第 2 段  设备名 —— **今天唯一一项真数据**，上电就定死了
+ *   第 3 段  无线     —— Step 7（WiFi STA + HTTP/WS）
+ *   第 4 段  配网     —— Step 5（BLE 配网 GATT 服务）
+ *
+ * ⚠️ 后两段是**占位**：服务层要到计划里的 Step 5~7 才做（放 net_lock.ino，
+ * 本文件只负责画）。所以这两行显示的"未接入"不是 bug，是实话。
  *
  * 它为什么这么早就存在：桌面是**一行三格**（用户定的版面），三个格子必须
  * 都有应用，否则 K1/K2 的循环选中会跳过空格子，看起来像按键失灵。
@@ -52,10 +57,18 @@ void netDraw(uint32_t now) {
   u8g2.drawHLine(0, BAND_SEP_Y, 128);   // 第 1 段与下方内容之间的分隔线
 
   drawBand(0, "网络");
-  drawBand(1, "无线  未接入");     // Step 7：WiFi STA + HTTP/WS
-  drawBand(2, "配网  未接入");     // Step 5：BLE 配网 GATT 服务
-  // 第 3 段留空，和定时锁待机时一样（用户标记「待定」的那一段）。
-  // 等 Step 7 做完，这里放 IP 或者信号强度。
+
+  // 设备名。**唯一一项今天就是真数据的东西** —— 它不依赖网络，上电就定了
+  // （生成一次后存 NVS，见主 .ino 的「设备名」一节）。
+  //
+  // 最长的情况是 "设备  LM-WWW-999"，实测 109px；drawBand 从 x=2 起画，
+  // 一行有 126px 可用，装得下（tools/fontcheck 量的）。
+  char buf[32];
+  snprintf(buf, sizeof(buf), "设备  %s", deviceName());
+  drawBand(1, buf);
+
+  drawBand(2, "无线  未接入");     // Step 7：WiFi STA + HTTP/WS
+  drawBand(3, "配网  未接入");     // Step 5：BLE 配网 GATT 服务
 }
 
 // 心跳日志第二段

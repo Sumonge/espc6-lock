@@ -9,9 +9,13 @@
  * 而不是表里的一项。
  *
  * 按键：
- *   K1/K2  选中的格子循环（到头顶绕回）
+ *   K1     选中框**向右**移一格
+ *   K2     选中框**向左**移一格
  *   K3     进入选中的应用
  *   K4     单击/双击都由框架处理成"返回桌面"，这里什么都不用写
+ *
+ * 两端的绕回是 (i + 1) % 3 的自然结果：最右边按 K1 回到最左边。用户要的
+ * 是"K1 向右 K2 向左"，绕回方向跟着这个定义走，没有额外规则。
  *
  * 决策记录（用户拍板，别推翻）：
  *   - 版面 = **状态栏 16px + 图标行 32px，第 4 段留空**。当时给了三种
@@ -163,12 +167,16 @@ void deskTick(uint32_t now) {
 void deskInput(uint32_t now) {
   (void)now;
 
+  // **K1 向右、K2 向左**（用户 2026-09-22 指定）。注意这和常见的排法相反：
+  // 一般会把左边的键当"上一个"。这里是**用户要的方向**，别看着别扭就顺手
+  // 换回去 —— 桌面上光标往哪边走是用户的手感问题，不是对错问题。
+  //
   // 只用 pressEdge，**刻意不接 repeatEdge**：三个应用绕一圈只要按两下，
   // 连发会让选中框每秒跳八格，看起来像坏了。
   // （这一行原来写的是"等网格铺满 6 格再加连发"—— 那个前提随 1x3 版面
   //   作废了：现在**永远只有 3 格**，所以连发不会有加进来的那一天。）
-  if (btn[0].pressEdge) deskSel = (uint8_t)((deskSel + APP_COUNT - 1) % APP_COUNT);
-  if (btn[1].pressEdge) deskSel = (uint8_t)((deskSel + 1) % APP_COUNT);
+  if (btn[0].pressEdge) deskSel = (uint8_t)((deskSel + 1) % APP_COUNT);
+  if (btn[1].pressEdge) deskSel = (uint8_t)((deskSel + APP_COUNT - 1) % APP_COUNT);
   if (btn[2].pressEdge) appOpen(deskSel);
 
   // K4 一个字都不用写：不消费那次单击，框架就当作"返回桌面"，
